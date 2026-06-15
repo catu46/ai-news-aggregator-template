@@ -1,0 +1,15 @@
+# Pipeline (Python 3.12, asyncio)
+anthropic>=0.40            # curador Haiku 4.5 + Structured Outputs
+voyageai>=0.3.0            # embeddings voyage-4-lite
+feedparser>=6.0            # Reddit via feed RSS/Atom (o .json passou a dar 403)
+beautifulsoup4>=4.12       # extrai texto do HTML dos feeds do Reddit
+python-telegram-bot[job-queue]==22.8  # bot + inline 👍/👎 (long-polling) + JobQueue (entrega auto)
+asyncpg>=0.30              # Postgres (Supabase) async
+pgvector>=0.3.0            # codec do tipo vector p/ asyncpg
+pydantic>=2.6              # schema do veredito (Structured Outputs)
+PyYAML>=6.0                # config/sources.yaml + seeds.yaml
+python-dotenv>=1.0         # .env
+httpx>=0.27,<0.29          # cliente HTTP das fontes Reddit/GitHub + leitor Jina no bot; faixa exigida pelo PTB 22.8
+twitter-cli>=0.5           # scraper grátis do X via cookies (lê TWITTER_AUTH_TOKEN/TWITTER_CT0)
+mcp>=1.2                   # servidor MCP: expõe o acervo curado p/ o Claude (Code/Desktop)
+openai>=1.40               # curador alternativo Kimi (Moonshot, API compatível com OpenAI)

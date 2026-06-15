@@ -1,0 +1,126 @@
+"""MCP server: exposes YOUR curated archive as tools for Claude.
+
+A THIN shell on top of Database — it reuses exactly what the bot already uses
+(search_pool / recall_voted / active_focus). This way you ask Claude directly
+("what did I like about RAG?") without opening Telegram.
+
+Run it as a local MCP server (stdio) and plug it into any Claude Code/Desktop:
+
+    claude mcp add acervo -- .venv/bin/python -m src.mcp_server.server
+
+Each person runs THEIR OWN instance (their Supabase, their telegram_user_id), so
+the data never mixes — it's the same multi-tenant isolation as the rest of the
+project. The user is resolved via TELEGRAM_USER_ID (.env) or by the 1st in
+sources.yaml.
+
+Identifiers in English; comments in English.
+"""
+from __future__ import annotations
+
+import os
+
+from mcp.server.fastmcp import FastMCP
+
+from ..common.config import load_settings, load_sources
+from ..common.db import Database
+from ..common.embeddings import Embedder
+
+mcp = FastMCP("acervo-ia")
+
+# Lazy state: connects on the 1st use of a tool and reuses the pool afterwards.
+_db: Database | None = None
+_embedder: Embedder | None = None
+
+
+def _resolve_telegram_id() -> int:
+    """Who 'you' are in this instance: TELEGRAM_USER_ID from .env, or 1st in yaml."""
+    env = os.getenv("TELEGRAM_USER_ID")
+    if env:
+        return int(env)
+    users = load_sources()
+    if users:
+        return users[0].telegram_user_id
+    raise RuntimeError(
+        "Set TELEGRAM_USER_ID in .env (or a user in config/sources.yaml)."
+    )
+
+
+async def _ensure() -> tuple[Database, Embedder, int]:
+    """Ensures DB + Embedder are connected; also returns the internal user_id."""
+    global _db, _embedder
+    if _db is None:
+        settings = load_settings()
+        _db = Database(settings.database_url)
+        await _db.connect()
+        _embedder = Embedder(settings)
+    user_id = await _db.get_or_create_user(_resolve_telegram_id())
+    return _db, _embedder, user_id
+
+
+def _headline(raw_text: str | None, width: int = 160) -> str:
+    for line in (raw_text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:width]
+    return (raw_text or "").strip()[:width]
+
+
+@mcp.tool()
+async def buscar_acervo(consulta: str, limite: int = 10) -> str:
+    """Semantic search in the curated archive (approved + what you saved/liked).
+
+    Use it for "is there anything in my archive about X?". ❤️ marks what you liked.
+    """
+    db, embedder, user_id = await _ensure()
+    vec = await embedder.embed_query(consulta)
+    rows = await db.search_pool(user_id, vec, limit=limite)
+    if not rows:
+        return f"Nothing in the archive about “{consulta}”."
+    lines = []
+    for i, r in enumerate(rows, start=1):
+        mark = " ❤️" if r["liked"] else ""
+        lines.append(
+            f"{i}.{mark} [{r['source_platform']}] {_headline(r['raw_text'])}\n"
+            f"   {r['source_url'] or ''}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def lembrar_votos(consulta: str, voto: str = "any", limite: int = 10) -> str:
+    """Recalls what YOU voted on about a topic, by similarity.
+
+    voto: "liked" (only 👍), "disliked" (only 👎) or "any" (any vote).
+    Use it for "what was that thing about X that I liked/disliked?".
+    """
+    db, embedder, user_id = await _ensure()
+    vec = await embedder.embed_query(consulta)
+    vote = {"liked": 1, "disliked": -1}.get(voto)  # None = any vote
+    rows = await db.recall_voted(user_id, vec, vote=vote, limit=limite)
+    if not rows:
+        return f"You haven't voted on anything about “{consulta}” yet."
+    lines = []
+    for i, r in enumerate(rows, start=1):
+        mark = "❤️" if r["vote"] == 1 else "👎"
+        lines.append(f"{i}. {mark} {_headline(r['raw_text'])}\n   {r['source_url'] or ''}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def ver_foco() -> str:
+    """Shows the active direction (/foco) of each bucket: 📦 repos and 🗞️ news."""
+    db, _embedder, user_id = await _ensure()
+    lines = []
+    for bucket, label in (("repos", "📦 repos"), ("news", "🗞️ news")):
+        for r in await db.active_focus(user_id, bucket):
+            lines.append(f"{label}: {r['topic']}")
+    return "\n".join(lines) if lines else "No active focus."
+
+
+def main() -> None:
+    """Starts the MCP server in stdio (the default mode for Claude Code/Desktop)."""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()

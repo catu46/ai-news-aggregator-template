@@ -1,0 +1,23 @@
+# Segredos — NUNCA comitar
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Sistema
+.DS_Store
+
+# Config local do Claude Code
+.claude/
+
+# Saídas locais
+claude_outputs/
+.cache/
+
+# config pessoal (crie a partir dos .example)
+config/sources.yaml
+config/seeds.yaml
