@@ -4,10 +4,10 @@ Four possible intents:
   - "steer"   -> steer the feed for a while ("for 2 days I want repos about
                  skills and news about AI finance").
   - "recall"  -> recall something HE ALREADY received and voted on ("what was
-                 that RAG news I liked?", "there was a repo about agents I
-                 disliked, which one was it?").
-  - "balance" -> change the fresh×relevant mix of the feed ("send me more fresh
-                 stuff", "focus on what's relevant to me").
+                 that RAG news I liked?", "there was a repo I disliked about
+                 agents, which one was it?").
+  - "balance" -> change the feed's fresh×relevant mix ("send me more new stuff",
+                 "focus on what's relevant to me").
   - "other"   -> anything else.
 
 Same model family as the curator (Haiku 4.5) via Structured Outputs. It is cheap
@@ -26,7 +26,7 @@ logger = logging.getLogger("steering")
 
 # Default validity when the user doesn't say for how long (~2 weeks).
 DEFAULT_FOCUS_DAYS = 14
-# Safety cap: nobody pins a focus for more than ~2 months by accident.
+# Safety ceiling: nobody pins a focus for more than ~2 months by accident.
 MAX_FOCUS_DAYS = 60
 
 _SYSTEM = """You interpret messages from the owner of a personal AI feed and
@@ -38,36 +38,37 @@ The feed delivers TWO buckets per day:
 On each card they tap 👍 or 👎.
 
 1) kind = "steer" — they want to STEER the feed for a while. E.g.: "for the next
-   two days I want news about the AI finance world and repos about skills".
+   two days I want news about the AI financial world and repos about skills".
    Fill `directives` with one item per (bucket, topic):
      - bucket: "repos" or "news"
      - topic: a few words, GOOD FOR SEARCH (in ENGLISH for technical topics —
        e.g.: "AI funding venture capital", "agent skills")
-     - days: the stated timeframe converted to days; if unstated, 0 (the app applies the default).
+     - days: the stated timeframe converted to days; if not stated, 0 (the app
+       applies the default).
 
 2) kind = "recall" — they want to RECALL something they ALREADY received and
-   voted on. E.g.: "what was that RAG news I liked?", "there was a repo about
-   agents I disliked, which one was it?". Fill:
-     - recall_query: the topic to search (in ENGLISH for technical topics)
-     - recall_polarity: "liked" if they say they liked it / gave 👍; "disliked"
-       if they say they didn't like it / gave 👎; "any" if unclear.
+   voted on. E.g.: "what was that RAG news I liked?", "there was a repo I
+   disliked about agents, which one was it?". Fill:
+     - recall_query: the topic to search for (in ENGLISH for technical topics)
+     - recall_polarity: "liked" if they say they liked it/gave 👍; "disliked" if
+       they say they didn't like it/gave 👎; "any" if unclear.
 
 3) kind = "balance" — they want to change the MIX between FRESH and RELEVANT
-   content in the feed. E.g.: "send me more fresh stuff", "too much old stuff is
-   coming through", "I want half fresh half relevant", "focus on what's relevant
-   to me". Fill:
-     - balance_bucket: "repos", "news", or "both" (if unspecified, "both")
-     - balance_fresh: fraction 0..1 of how much should be FRESH. Map the phrasing:
-       "fresh only"≈0.9, "more fresh"≈0.6, "half-and-half"=0.5,
+   content in the feed. E.g.: "send me more new stuff", "too much old stuff is
+   coming", "I want half fresh, half relevant", "focus on what's relevant to me".
+   Fill:
+     - balance_bucket: "repos", "news" or "both" (if unspecified, "both")
+     - balance_fresh: fraction 0..1 of how much should be FRESH. Map the wording:
+       "fresh only"≈0.9, "more new"≈0.6, "half-and-half"=0.5,
        "more relevant"≈0.25, "relevant only"≈0.1.
 
 4) kind = "other" — small talk, a question about the bot, a thank-you, etc.
 
 `reply`: ALWAYS in English, short. For "steer" confirm what you understood; for
-"recall" say you'll look for it; for "balance" confirm the new mix; for "other"
-give a 1-line pointer.
+"recall" say you'll go look; for "balance" confirm the new mix; for "other" give
+a 1-line pointer.
 
-Unused fields default to: directives=[], recall_query="",
+Unused fields stay as: directives=[], recall_query="",
 recall_polarity="any", balance_bucket="both", balance_fresh=0.4."""
 
 
@@ -100,7 +101,7 @@ class Steerer:
                 messages=[{"role": "user", "content": message}],
                 output_format=ChatIntent,
             )
-        except Exception:  # noqa: BLE001 — never takes down the message handler
+        except Exception:  # noqa: BLE001 — never brings down the message handler
             logger.exception("steering: failed to interpret message")
             return None
 
@@ -110,7 +111,7 @@ class Steerer:
         if intent is None:
             return None
 
-        # `days` hygiene: 0/negative -> default; applies the safety cap.
+        # `days` hygiene: 0/negative -> default; applies the safety ceiling.
         for item in intent.directives:
             if item.days <= 0:
                 item.days = DEFAULT_FOCUS_DAYS
@@ -122,7 +123,7 @@ class Steerer:
 
         The archive is embedded in English; translating the search improves
         recall. If it's already English, returns it unchanged. On any failure,
-        returns the original (never takes down the search).
+        returns the original (never brings down the search).
         """
         text = (text or "").strip()
         if not text:
@@ -139,8 +140,8 @@ class Steerer:
                 ),
                 messages=[{"role": "user", "content": text}],
             )
-        except Exception:  # noqa: BLE001 — translation never takes down the search
-            logger.exception("translate_to_en: failed; using the original query")
+        except Exception:  # noqa: BLE001 — translation never brings down the search
+            logger.exception("translate_to_en: failed; using original query")
             return text
         out = "".join(
             getattr(b, "text", "") for b in resp.content

@@ -17,7 +17,7 @@ CONFIG_DIR = ROOT / "config"
 def _env(name: str, default: str | None = None, *, required: bool = False) -> str | None:
     val = os.getenv(name, default)
     if required and not val:
-        raise RuntimeError(f"Required environment variable missing: {name}")
+        raise RuntimeError(f"Missing required environment variable: {name}")
     return val
 
 
@@ -40,7 +40,7 @@ class Settings:
     moonshot_base_url: str
     kimi_model: str
     digest_hour: int               # local hour of the daily delivery (0-23)
-    digest_tz: str                 # IANA timezone for the delivery hour
+    digest_tz: str                 # IANA time zone for the delivery hour
 
 
 def load_settings() -> Settings:
@@ -70,7 +70,7 @@ def load_settings() -> Settings:
 
 
 # --------------------------------------------------------------------------
-# sources.yaml  (per-user sources)
+# sources.yaml  (sources per user)
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class UserSources:
@@ -106,7 +106,7 @@ def load_sources(path: Path | None = None) -> list[UserSources]:
 
 
 # --------------------------------------------------------------------------
-# seeds.yaml  (per-user cold-start examples)
+# seeds.yaml  (cold-start examples per user)
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SeedExample:
@@ -116,7 +116,7 @@ class SeedExample:
 
 
 def load_seeds(path: Path | None = None) -> dict[str, list[SeedExample]]:
-    """Returns {user_key: [SeedExample, ...]}. Ties to telegram_user_id via sources."""
+    """Returns {user_key: [SeedExample, ...]}. Links to telegram_user_id via sources."""
     path = path or (CONFIG_DIR / "seeds.yaml")
     if not path.exists():
         return {}
@@ -127,7 +127,7 @@ def load_seeds(path: Path | None = None) -> dict[str, list[SeedExample]]:
         for label in ("gold", "noise"):
             for item in (u.get(label) or []):
                 text = (item.get("text") or "").strip()
-                if not text or text.startswith("<"):  # skip placeholders <...>
+                if not text or text.startswith("<"):  # ignore <...> placeholders
                     continue
                 examples.append(SeedExample(text=text, label=label, url=item.get("url")))
         if examples:

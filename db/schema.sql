@@ -4,7 +4,7 @@
 -- Embeddings: Voyage voyage-4-lite, 1024-dim, L2-normalized (cosine == dot)
 -- Curator:    Claude Haiku 4.5 (claude-haiku-4-5)
 --
--- Data model: SHARED POOL of posts (curated once = QUALITY verdict,
+-- Data model: SHARED POOL of posts (curated once = a QUALITY verdict,
 -- user-agnostic). Each person's TASTE lives in per-user votes/deliveries.
 -- Adding people does not multiply the cost.
 -- =============================================================================
@@ -16,7 +16,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ---------------------------------------------------------------------------
 CREATE TABLE users (
     id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    telegram_user_id  BIGINT      NOT NULL UNIQUE,   -- lock: only this id can vote
+    telegram_user_id  BIGINT      NOT NULL UNIQUE,   -- lock: only this id may vote
     display_name      TEXT,
     settings          JSONB       NOT NULL DEFAULT '{}'::jsonb,
     is_active         BOOLEAN     NOT NULL DEFAULT true,
@@ -30,10 +30,10 @@ CREATE TABLE users (
 CREATE TABLE posts (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
-    -- Origin metadata (typed, indexable)
+    -- Source metadata (typed, indexable)
     source_platform     TEXT        NOT NULL
                             CHECK (source_platform IN ('reddit', 'twitter', 'seed', 'github', 'manual')),
-    source_id           TEXT        NOT NULL,          -- platform-native id (dedup)
+    source_id           TEXT        NOT NULL,          -- native platform id (dedup)
     source_url          TEXT        NOT NULL,
     author              TEXT,
     published_at        TIMESTAMPTZ,                   -- published at the source
@@ -42,7 +42,7 @@ CREATE TABLE posts (
     -- Per-platform variable fields (subreddit, score, likes, media flags...)
     metadata            JSONB       NOT NULL DEFAULT '{}'::jsonb,
 
-    -- Raw text (pruned for old rejected posts by retention)
+    -- Raw text (pruned for old rejected posts by the retention job)
     raw_text            TEXT,
     raw_text_pruned_at  TIMESTAMPTZ,
 
@@ -53,12 +53,12 @@ CREATE TABLE posts (
     reject_reason       TEXT,
     rationale           TEXT,
     summary             TEXT,                          -- short summary for the Telegram card
-    curator_model       TEXT,                          -- e.g.: claude-haiku-4-5
+    curator_model       TEXT,                          -- e.g. claude-haiku-4-5
     curated_at          TIMESTAMPTZ,
 
-    -- Embedding for semantic search + pinned model (detects swap = re-embed)
+    -- Embedding for semantic search + pinned model (detects a swap = re-embed)
     embedding           vector(1024),
-    embedding_model     TEXT,                          -- e.g.: voyage-4-lite
+    embedding_model     TEXT,                          -- e.g. voyage-4-lite
 
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -73,7 +73,7 @@ CREATE TABLE posts (
 );
 
 -- ---------------------------------------------------------------------------
--- deliveries: what was DELIVERED to each user (feed scope + recall).
+-- deliveries: what was DELIVERED to each user (scope of the feed + recall).
 -- ---------------------------------------------------------------------------
 CREATE TABLE deliveries (
     id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -105,17 +105,16 @@ CREATE TABLE votes (
 
 -- ---------------------------------------------------------------------------
 -- focus: temporary feed "direction", per user and per bucket (repos/news).
--- E.g.: "for the next 2 days I want news about the financial world of AI".
--- Re-ranks delivery toward the topic AND injects the topic into collection
--- (search + repos). One ACTIVE direction per (user, bucket); re-directing
--- replaces the previous one.
+-- e.g. "for the next 2 days I want news about the AI finance world".
+-- Re-ranks delivery toward the topic AND injects the topic into collection (search + repos).
+-- One ACTIVE direction per (user, bucket); redirecting replaces the previous one.
 -- ---------------------------------------------------------------------------
 CREATE TABLE focus (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id     BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     bucket      TEXT        NOT NULL CHECK (bucket IN ('repos', 'news')),
     topic       TEXT        NOT NULL,                  -- topic, good for search
-    embedding   vector(1024),                          -- to re-rank delivery
+    embedding   vector(1024),                          -- for re-ranking delivery
     weight      REAL        NOT NULL DEFAULT 1.2,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ                             -- NULL = no expiry
@@ -137,7 +136,7 @@ CREATE TRIGGER votes_set_updated_at BEFORE UPDATE ON votes
 -- ---------------------------------------------------------------------------
 -- Indexes
 -- ---------------------------------------------------------------------------
--- Vector search (recall + affinity). HNSW for incremental inserts into a
+-- Vector search (recall + affinity). HNSW for incremental inserts on a
 -- growing table (not IVFFlat). cosine == dot because the vectors are
 -- L2-normalized; the ORDER BY operator must match: <=> (cosine).
 CREATE INDEX posts_embedding_hnsw ON posts
@@ -166,7 +165,7 @@ CREATE INDEX votes_post_idx      ON votes (post_id);
 --   INSERT INTO votes (user_id, post_id, vote, origin) VALUES (:u, :p, :v, 'telegram')
 --   ON CONFLICT (user_id, post_id) DO UPDATE SET vote = EXCLUDED.vote, updated_at = now();
 --
--- RECALL ("did I like something recent about XPTO?") — per user:
+-- RECALL ("did I recently like something about XPTO?") — per user:
 --   SELECT p.source_url, p.embedding <=> :q AS dist
 --   FROM votes v JOIN posts p ON p.id = v.post_id
 --   WHERE v.user_id = :uid AND v.vote = 1 AND p.embedding IS NOT NULL
@@ -175,7 +174,7 @@ CREATE INDEX votes_post_idx      ON votes (post_id);
 --   LIMIT 20;
 --   (run SET hnsw.ef_search = 100; in the session to improve recall)
 --
--- AFFINITY PRIOR (cold-start gate: only activates with >= ~20 votes/class):
+-- AFFINITY PRIOR (cold-start gate: only kicks in with >= ~20 votes/class):
 --   centroid = SELECT AVG(embedding) FROM votes v JOIN posts p ON p.id=v.post_id
 --              WHERE v.user_id = :uid AND v.vote = 1;
 --

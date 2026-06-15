@@ -1,7 +1,7 @@
 """GitHub ingestion: trending repos by topic, via the public Search API.
 
-For each query/topic, it searches for recently CREATED repos, sorted by stars
-(an honest proxy for "a new repo that's already taking off"). For each repo, it
+For each query/topic, it fetches repos CREATED recently, sorted by stars
+(an honest proxy for "a new repo that's already taking off"). For each repo it
 also fetches the README (best-effort) — so the embedding has real content and
 the curator can summarize "what the repo is".
 
@@ -19,7 +19,7 @@ from .base import IngestionSource
 
 GITHUB_API = "https://api.github.com"
 GITHUB_SEARCH_URL = f"{GITHUB_API}/search/repositories"
-README_MAX = 5000  # README chars stored/embedded
+README_MAX = 5000  # chars of the README stored/embedded
 
 
 class GitHubSource(IngestionSource):
@@ -73,7 +73,7 @@ class GitHubSource(IngestionSource):
                     resp = await client.get(GITHUB_SEARCH_URL, params=params)
                     resp.raise_for_status()
                     items = resp.json().get("items", [])
-                except Exception:  # isolate one query's failure; keep going with the rest
+                except Exception:  # isolate a query's failure; carry on with the rest
                     continue
 
                 for repo in items:

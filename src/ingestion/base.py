@@ -1,7 +1,7 @@
 """Common interface for ingestion sources.
 
 Every source (Reddit, X, ...) implements `fetch()` and returns a batch of
-normalized `IngestedPost`. The runner deduplicates by (platform, source_id)
+normalized `IngestedPost` objects. The runner deduplicates by (platform, source_id)
 in the database, so sources don't need to worry about duplicates.
 """
 from __future__ import annotations

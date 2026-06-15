@@ -2,7 +2,7 @@
 
 Architecture
 ------------
-- `Curator` (ABC): the stable interface. Any impl follows
+- `Curator` (ABC): the stable interface. Every impl follows
   `async def classify(post_text, similarity_signal=None) -> Verdict | None`.
 - `AnthropicCurator`: default impl using Haiku 4.5 via Structured Outputs
   (`client.messages.parse(..., output_format=Verdict)`), with the large rubric
@@ -12,8 +12,6 @@ Architecture
 
 Swapping providers is trivial: see `DeepSeekCurator` (commented sketch at the
 end). Just implement `classify()` with the same signature and return a `Verdict`.
-
-Identifiers in English; comments in English.
 """
 from __future__ import annotations
 
@@ -33,10 +31,10 @@ from .prompt import RUBRIC, build_user_message
 
 logger = logging.getLogger("curator")
 
-# Haiku 4.5 pricing (USD per 1M tokens), verified Jun/2026.
+# Haiku 4.5 price (USD per 1M tokens), verified Jun/2026.
 # Tokens read from cache cost ~0.1x of input; here we use a conservative
 # estimate (we charge cache_read at the same price as input). Overestimating
-# spend is safe: worst case we stop a little before the real budget.
+# the spend is safe: in the worst case we stop a bit short of the real budget.
 _PRICE_INPUT_PER_TOKEN = 1.0 / 1_000_000   # $1 / 1M input
 _PRICE_OUTPUT_PER_TOKEN = 5.0 / 1_000_000  # $5 / 1M output
 
@@ -47,7 +45,7 @@ _DEFAULT_SPEND_PATH = Path(
 
 
 class BudgetExceeded(RuntimeError):
-    """Estimated monthly curator spend exceeded the configured budget."""
+    """The curator's estimated monthly spend exceeded the configured budget."""
 
     def __init__(self, month: str, spent_usd: float, budget_usd: float) -> None:
         self.month = month
@@ -112,11 +110,11 @@ class SpendGuard:
 
 
 def estimate_cost_usd(usage: object) -> float:
-    """Approximate USD of a response, from `resp.usage`.
+    """Approximate USD for a response, from `resp.usage`.
 
     We charge input + cache_read at the input price (conservative estimate)
     and output at the output price. `usage` is the SDK object (attributes may
-    be missing depending on the version) — we read it defensively.
+    be missing depending on the version) — we read defensively.
     """
     input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
@@ -135,12 +133,13 @@ class Curator(ABC):
 
     @abstractmethod
     async def classify(
-        self, post_text: str, similarity_signal: str | None = None
+        self, post_text: str, similarity_signal: str | None = None,
+        interests: list[str] | None = None,
     ) -> Verdict | None:
         """Classifies `post_text`. None on refusal/max_tokens/empty parse.
 
         May raise `BudgetExceeded` if the spend guard is over budget.
-        The caller marks an error (mark_curation_error) when it receives None.
+        The caller marks an error (mark_curation_error) when it gets None.
         """
         raise NotImplementedError
 
@@ -159,7 +158,7 @@ class AnthropicCurator(Curator):
     ) -> None:
         self._settings = settings
         self._model = settings.curator_model
-        self.model = settings.curator_model  # public: the runner reads via curator_model_of()
+        self.model = settings.curator_model  # public: the runner reads it via curator_model_of()
         self._budget_usd = settings.curator_monthly_budget_usd
         self._max_tokens = max_tokens
         self._spend = spend_guard or SpendGuard()
@@ -167,8 +166,8 @@ class AnthropicCurator(Curator):
             api_key=settings.anthropic_api_key
         )
 
-        # STATIC and CACHED system block. The rubric is intentionally large
-        # (>= 4096 tokens, Haiku's floor) so prompt caching kicks in: the
+        # STATIC and CACHED system block. The rubric is large on purpose
+        # (>= 4096 tokens, Haiku's floor) so that prompt caching kicks in: the
         # prefix is byte-for-byte identical on every call.
         self._system = [
             {
@@ -178,21 +177,22 @@ class AnthropicCurator(Curator):
             }
         ]
 
-    # ---- budget guard (exposed for the runner to check before running) --
+    # ---- budget guard (exposed for the runner to check before running) ------
     @property
     def spent_this_month(self) -> float:
         return self._spend.spent_this_month()
 
     def is_over_budget(self, budget_usd: float | None = None) -> bool:
-        """True if the month's spend reached the budget (default = the Settings one)."""
+        """True if the month's spend reached the budget (default = the one in Settings)."""
         return self._spend.is_over_budget(
             self._budget_usd if budget_usd is None else budget_usd
         )
 
     async def classify(
-        self, post_text: str, similarity_signal: str | None = None
+        self, post_text: str, similarity_signal: str | None = None,
+        interests: list[str] | None = None,
     ) -> Verdict | None:
-        # Budget gate BEFORE spending: cheap, and avoids blowing past it entirely.
+        # Budget gate BEFORE spending: cheap and avoids blowing past it.
         if self.is_over_budget():
             raise BudgetExceeded(
                 SpendGuard._month_key(), self.spent_this_month, self._budget_usd
@@ -203,9 +203,10 @@ class AnthropicCurator(Curator):
             author=None,
             metadata=None,
             similarity_signal=similarity_signal,
+            interests=interests,
         )
 
-        # Structured Outputs forces the Verdict schema. NEVER pass `effort`
+        # Structured Outputs enforces the Verdict schema. NEVER pass `effort`
         # (Haiku doesn't support it). Small max_tokens: the verdict is tiny.
         resp = await self._client.messages.parse(
             model=self._model,
@@ -215,10 +216,10 @@ class AnthropicCurator(Curator):
             output_format=Verdict,
         )
 
-        # ALWAYS record spend (even on failure — tokens were already charged).
+        # ALWAYS account for the spend (even on failure — tokens were already charged).
         try:
             self._spend.add(estimate_cost_usd(resp.usage))
-        except Exception:  # noqa: BLE001 — accounting never takes down curation
+        except Exception:  # noqa: BLE001 — accounting never brings down the curation
             pass
 
         # Failures treated as None: the caller marks an error and moves on.
@@ -238,11 +239,11 @@ class AnthropicCurator(Curator):
 # ==========================================================================
 # NOTE — second provider behind the SAME interface (sketch).
 # --------------------------------------------------------------------------
-# DeepSeek could be a second impl of `Curator`. Its API is OpenAI-style
-# compatible; with `response_format`/function-calling for the JSON, you could
-# map the output into the same `Verdict` and return it here.
-# The rest of the pipeline (runner, db.mark_curation) doesn't change — only the
-# injected `Curator` is different. Sketch:
+# DeepSeek could be a second impl of `Curator`. Its API is compatible with the
+# OpenAI style; with `response_format`/function-calling for the JSON, you could
+# map the output into the same `Verdict` and return it here. The rest of the
+# pipeline (runner, db.mark_curation) doesn't change — only the injected
+# `Curator` is different. Sketch:
 #
 #   class DeepSeekCurator(Curator):
 #       def __init__(self, settings, *, spend_guard=None, ...):
@@ -265,11 +266,11 @@ class AnthropicCurator(Curator):
 #               response_format={"type": "json_object"},
 #               max_tokens=300,
 #           )
-#           # ...accumulate spend via DeepSeek's pricing table...
+#           # ...accumulate spend via DeepSeek's price table...
 #           # ...parse the JSON and validate with Verdict.model_validate_json(...)...
 #           # ...return Verdict or None on failure.
 #
-# Prices and the `usage` reading are provider-specific, but
+# The prices and the `usage` reading are provider-specific, but
 # `SpendGuard`/`BudgetExceeded` are reused. This sketch is REALIZED below as
 # `KimiCurator` (Moonshot/Kimi, selectable via CURATOR_PROVIDER).
 # ==========================================================================
@@ -296,17 +297,18 @@ EXACTLY these keys:
 }
 """
 
-# Kimi k2.6 pricing (USD per 1M tokens), reported by the provider (Moonshot).
+# Kimi k2.6 prices (USD per 1M tokens), reported by the provider (Moonshot).
 _KIMI_INPUT_HIT = 0.16 / 1_000_000   # input on cache hit
 _KIMI_INPUT_MISS = 0.95 / 1_000_000  # input on cache miss
 _KIMI_OUTPUT = 4.00 / 1_000_000
 
 
 def estimate_kimi_cost_usd(usage: object) -> float:
-    """Approximate USD of a Kimi response, from the OpenAI-style `usage`.
+    """Approximate USD for a Kimi response, from the OpenAI-style `usage`.
 
-    Uses `prompt_tokens_details.cached_tokens` when available (charges the cache
-    hit cheaper); otherwise, charges all input at the cache-miss price (conservative).
+    Uses `prompt_tokens_details.cached_tokens` when available (charges the
+    cheaper cache hit); otherwise, charges all input at the cache miss price
+    (conservative).
     """
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -322,9 +324,9 @@ class KimiCurator(Curator):
     """Alternative curator via Moonshot/Kimi (OpenAI-compatible API).
 
     Selectable via `CURATOR_PROVIDER=kimi`. Reuses the `RUBRIC`, the
-    `SpendGuard`, and the `BudgetExceeded` — the rest of the pipeline doesn't
-    change. Since Kimi has no `messages.parse`, we use JSON mode + Pydantic
-    validation (`Verdict`).
+    `SpendGuard` and the `BudgetExceeded` — the rest of the pipeline doesn't
+    change. Since Kimi doesn't have `messages.parse`, we use JSON mode +
+    Pydantic validation (`Verdict`).
     """
 
     def __init__(
@@ -342,7 +344,7 @@ class KimiCurator(Curator):
                 "CURATOR_PROVIDER=kimi, but MOONSHOT_API_KEY is missing from .env."
             )
         self._model = settings.kimi_model
-        self.model = settings.kimi_model  # public: the runner reads via curator_model_of()
+        self.model = settings.kimi_model  # public: the runner reads it via curator_model_of()
         self._budget_usd = settings.curator_monthly_budget_usd
         self._max_tokens = max_tokens
         self._spend = spend_guard or SpendGuard()
@@ -350,7 +352,7 @@ class KimiCurator(Curator):
             api_key=settings.moonshot_api_key,
             base_url=settings.moonshot_base_url,
         )
-        # Static system prefix (RUBRIC + JSON contract) -> Kimi cache.
+        # Static system prefix (RUBRIC + JSON contract) -> Kimi's cache.
         self._system = RUBRIC + _KIMI_JSON_CONTRACT
 
     @property
@@ -363,7 +365,8 @@ class KimiCurator(Curator):
         )
 
     async def classify(
-        self, post_text: str, similarity_signal: str | None = None
+        self, post_text: str, similarity_signal: str | None = None,
+        interests: list[str] | None = None,
     ) -> Verdict | None:
         if self.is_over_budget():
             raise BudgetExceeded(
@@ -372,7 +375,7 @@ class KimiCurator(Curator):
 
         user_message = build_user_message(
             raw_text=post_text, author=None, metadata=None,
-            similarity_signal=similarity_signal,
+            similarity_signal=similarity_signal, interests=interests,
         )
         try:
             resp = await self._client.chat.completions.create(
@@ -389,10 +392,10 @@ class KimiCurator(Curator):
             logger.exception("kimi: classification call failed")
             return None
 
-        # ALWAYS record spend (tokens were already charged).
+        # ALWAYS account for the spend (tokens were already charged).
         try:
             self._spend.add(estimate_kimi_cost_usd(resp.usage))
-        except Exception:  # noqa: BLE001 — accounting never takes down curation
+        except Exception:  # noqa: BLE001 — accounting never brings down the curation
             pass
 
         try:
@@ -407,7 +410,7 @@ class KimiCurator(Curator):
 
         try:
             verdict = Verdict.model_validate_json(content)
-        except Exception:  # noqa: BLE001 — invalid JSON / off-schema
+        except Exception:  # noqa: BLE001 — invalid JSON / outside the schema
             logger.warning("kimi: response did not validate against Verdict")
             return None
 
@@ -417,7 +420,7 @@ class KimiCurator(Curator):
 
 
 def make_curator(settings: Settings, *, spend_guard: SpendGuard | None = None) -> Curator:
-    """Curator factory: picks the provider by `settings.curator_provider`.
+    """Curator factory: picks the provider via `settings.curator_provider`.
 
     Default = Anthropic (Haiku). `CURATOR_PROVIDER=kimi` switches to Kimi without
     touching the rest of the pipeline (the `Curator` interface is the same).

@@ -1,21 +1,21 @@
-"""Seed / cold-start: loads the user's taste examples BEFORE any real
-ingestion, so the system already has signal on day 1.
+"""Seed / cold-start: loads the user's taste examples BEFORE any real ingestion,
+so the system already has signal on day 1.
 
 For each user present in seeds.yaml:
-  1. resolves the telegram_user_id via sources.yaml and creates/retrieves the user_id;
-  2. turns each SeedExample into an IngestedPost with source_platform='seed'
+  1. resolve the telegram_user_id via sources.yaml and create/fetch the user_id;
+  2. turn each SeedExample into an IngestedPost with source_platform='seed'
      and a deterministic source_id ('seed-' + sha1(text)[:16]);
-  3. upserts the post (dedup by the (source_platform, source_id) pair);
-  4. embeds the text and stores the embedding (feeds RECALL and the centroid);
-  5. records a pre-loaded vote: gold => +1 (👍), noise => -1 (👎),
+  3. upsert the post (dedup by the (source_platform, source_id) pair);
+  4. embed the text and store the embedding (feeds RECALL and the centroid);
+  5. record a pre-loaded vote: gold => +1 (👍), noise => -1 (👎),
      with origin='seed'.
 
-Seeds do NOT pass through the curator: the verdict is left NULL on purpose (they
+Seeds do NOT go through the curator: the verdict is left NULL on purpose (they
 are not "approved/rejected posts" — they are taste labels). That is why they feed
 the recall archive and the affinity prior, but do not enter the delivery flow.
 
-Note: the CHECK on `posts.source_platform` in `db/schema.sql` ALREADY accepts 'seed'
-(in addition to 'github' and 'manual'), so the seed upsert works directly — there
+Note: the `posts.source_platform` CHECK in `db/schema.sql` ALREADY accepts 'seed'
+(in addition to 'github' and 'manual'), so upserting seeds works directly — there
 is no extra schema step.
 
 Usage:  python -m src.seed
@@ -56,7 +56,7 @@ async def _seed_user(
     src: UserSources,
     examples: list[SeedExample],
 ) -> UserSeedResult:
-    """Seeds all examples for a single user."""
+    """Seed all examples for a single user."""
     user_id = await db.get_or_create_user(src.telegram_user_id, src.display_name)
     result = UserSeedResult(user_key=user_key, user_id=user_id)
 
@@ -73,14 +73,14 @@ async def _seed_user(
 
         post_id = await db.upsert_post(post)
         if post_id is None:
-            # Already existed (re-run, or the same text repeated): the embedding and
-            # vote were already written on the 1st pass. With no lookup method in the
+            # Already existed (re-run, or the same text repeated): embedding and vote
+            # were already stored on the 1st pass. With no lookup method in the
             # shared interface, we treat this as an idempotent no-op.
             result.skipped_dup += 1
             continue
 
         # Embedding (feeds centroid + recall). embed_documents works in batches;
-        # here it is 1 at a time to keep the post_id <-> vector relationship trivial.
+        # here it is 1 at a time to keep the post_id <-> vector relation trivial.
         [embedding] = await embedder.embed_documents([ex.text])
         await db.set_embedding(post_id, embedding, _model_of(embedder))
 
@@ -97,10 +97,11 @@ async def _seed_user(
 
 
 def _model_of(embedder: Embedder) -> str:
-    """Reads the Embedder's model id without relying on a nonexistent public attribute.
+    """Read the Embedder's model id without relying on a public attribute that
+    doesn't exist.
 
-    The Embedder stores the model in `_model`; we use getattr so it does not break
-    if the name changes in the future.
+    The Embedder keeps the model in `_model`; we use getattr so it won't break if
+    the name changes in the future.
     """
     return getattr(embedder, "_model", "voyage-4-lite")
 
@@ -114,7 +115,7 @@ async def main() -> None:
         print("No seeds found (config/seeds.yaml empty or only placeholders). Nothing to do.")
         return
 
-    # Index user_key -> UserSources to resolve each seed's telegram_user_id.
+    # Index user_key -> UserSources to resolve the telegram_user_id of each seed.
     sources_by_key = {s.key: s for s in sources}
 
     db = Database(settings.database_url)
@@ -131,7 +132,7 @@ async def main() -> None:
                 skipped_keys.append(user_key)
                 print(
                     f"[skip] user_key '{user_key}' has seeds but is not in "
-                    f"sources.yaml — cannot resolve telegram_user_id."
+                    f"sources.yaml — can't resolve telegram_user_id."
                 )
                 continue
             result = await _seed_user(db, embedder, user_key, src, examples)

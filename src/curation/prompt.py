@@ -2,11 +2,9 @@
 
 `RUBRIC` is the STATIC system block. It is deliberately long (>= 4096 tokens,
 Haiku 4.5's cache floor) so that prompt caching kicks in: the system prefix is
-identical on every call, so from the 2nd request on it is served at ~0.1x the
-input price. The padding is NOT random filler — these are worked examples
+identical on every call, so from the 2nd request onward it is served at ~0.1x of
+the input price. The padding is NOT random filler — they are worked examples
 (approve/reject) that also improve the classifier's calibration.
-
-Identifiers in English; comments in English.
 """
 from __future__ import annotations
 
@@ -14,7 +12,7 @@ import json
 from typing import Any
 
 # --------------------------------------------------------------------------
-# Rubric core: the "persona" and the hard approve/reject criteria.
+# Core of the rubric: the "persona" and the hard approve/reject criteria.
 # --------------------------------------------------------------------------
 _CORE = """\
 You are a RUTHLESS technical curator for a single senior engineer's private
@@ -116,6 +114,20 @@ Hard rules:
 - A famous author/company is not a free pass; judge the content, not the name.
 
 =====================================================================
+ACTIVE USER INTERESTS  (override — the user explicitly asked for these)
+=====================================================================
+The user message may include an "ACTIVE USER INTERESTS" line listing topics the
+user has EXPLICITLY asked to receive right now (e.g., via a "/focus" command).
+For content that is genuinely and specifically on-topic to a listed interest,
+RELAX the bar: APPROVE substantive, concrete items about it — INCLUDING funding
+rounds, business/market news, and company moves you would normally reject as
+"corporate_hype" or "off_topic". The user WANTS this; it is signal for them, not
+noise. Still REJECT empty hype/clickbait with zero substance (a bare "we raised
+$X, join the waitlist!" with no detail), and judge anything NOT related to a
+listed interest by the normal ruthless bar. On approve, set reject_reason="none"
+and pick the closest primary_category (use "other" if none fits).
+
+=====================================================================
 SOURCE-AWARE BAR
 =====================================================================
 The user message may begin with a "SOURCE:" line. Adjust the bar by source:
@@ -133,7 +145,7 @@ The user message may begin with a "SOURCE:" line. Adjust the bar by source:
 # --------------------------------------------------------------------------
 # Worked examples (few-shot). They serve 2 purposes:
 #   (1) calibrate the classifier with boundary cases;
-#   (2) push the system prefix above the 4096-token floor for caching.
+#   (2) push the system prefix above the 4096-token floor for the cache.
 # We keep ~6 examples covering each approve category and each reject_reason.
 # --------------------------------------------------------------------------
 _EXAMPLES = """\
@@ -152,9 +164,9 @@ POST:
 VERDICT:
   {"verdict": "approve", "confidence": 0.93,
    "primary_category": "data_engineering", "reject_reason": "none",
-   "summary": "A team cut Iceberg compaction cost by ~70% with a size-threshold
-   bin-pack rewrite and sorting on the filter column, and flags a manifest-rewrite
-   bug that double-counted deletes.",
+   "summary": "A team cut ~70% of Iceberg compaction cost with a size-threshold
+   bin-pack and sorting on the filter column, and flags a manifest-rewrite bug
+   that double-counted deletes.",
    "one_line_rationale": "Concrete table-format internals with a real fix, a
    measured result, and a non-obvious correctness gotcha."}
 WHY: Names the mechanism, reports numbers, and surfaces a subtle bug. Teaches a
@@ -402,37 +414,44 @@ Return exactly the structured verdict object. Be ruthless, be terse, and when
 in doubt, REJECT.
 """
 
-# Full and STATIC system prefix (cacheable). Don't interpolate anything dynamic
-# here — any byte that changes invalidates the prefix cache.
+# Complete and STATIC system prefix (cacheable). Do not interpolate anything
+# dynamic here — any byte that changes invalidates the prefix cache.
 RUBRIC = _CORE + "\n" + _EXAMPLES
 
 
 # --------------------------------------------------------------------------
-# User message (the VOLATILE part of the prompt — comes AFTER the cached
-# prefix). Includes the optional similarity signal coming from the RAG/seeds.
+# User message (VOLATILE part of the prompt — comes AFTER the cached prefix).
+# Includes the optional similarity signal coming from RAG/seeds.
 # --------------------------------------------------------------------------
 def build_user_message(
     raw_text: str,
     author: str | None,
     metadata: dict[str, Any] | None,
     similarity_signal: str | None = None,
+    interests: list[str] | None = None,
 ) -> str:
     """Builds the content of the user turn to classify.
 
-    `similarity_signal` is a short, optional hint (e.g. "similar to posts the
+    `similarity_signal` is a short, optional hint (e.g., "similar to posts the
     user liked" or "close to 'noise' examples"). We treat it as a hint, not an
-    order — the verdict is the curator's.
+    order — the verdict belongs to the curator.
     """
     parts: list[str] = ["Classify the following post. Respond only with the verdict."]
 
     if similarity_signal:
         parts.append(f"\nSIMILARITY SIGNAL (advisory only): {similarity_signal}")
 
+    if interests:
+        parts.append(
+            "\nACTIVE USER INTERESTS (relax the bar for genuinely on-topic items, "
+            "including funding/business/market news): " + ", ".join(interests)
+        )
+
     if author:
         parts.append(f"\nAUTHOR: {author}")
 
-    # Useful and cheap metadata (subreddit, score, etc.) without dumping the
-    # whole object — keeps the turn lean and cheap.
+    # Useful, cheap metadata (subreddit, score, etc.) without dumping the whole
+    # object — keeps the turn lean and cheap.
     if metadata:
         hints = _format_metadata_hints(metadata)
         if hints:

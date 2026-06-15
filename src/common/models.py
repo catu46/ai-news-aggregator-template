@@ -14,7 +14,7 @@ from pydantic import BaseModel
 @dataclass
 class IngestedPost:
     source_platform: Literal["reddit", "twitter", "seed", "github", "manual"]
-    source_id: str           # native platform id (dedup key)
+    source_id: str           # platform-native id (dedup key)
     source_url: str
     raw_text: str
     author: str | None = None
@@ -46,7 +46,7 @@ RejectReason = Literal[
 
 class Verdict(BaseModel):
     verdict: Literal["approve", "reject"]
-    confidence: float                 # 0..1 (validate in the app, not the schema)
+    confidence: float                 # 0..1 (validate in the app, not in the schema)
     primary_category: PrimaryCategory
     reject_reason: RejectReason
     summary: str                      # short summary (1-2 sentences) for the card
@@ -54,8 +54,8 @@ class Verdict(BaseModel):
 
 
 # --------------------------------------------------------------------------
-# Natural-language feed "direction" -> Structured Output schema.
-# The owner sends something like "for the next 2 days I want news about AI
+# Feed "direction" in natural language -> Structured Output schema.
+# The owner says something like "for the next 2 days I want news about AI
 # finance and repos about skills"; the Steerer returns a FocusPlan.
 # --------------------------------------------------------------------------
 FocusBucket = Literal["repos", "news"]

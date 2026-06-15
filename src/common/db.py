@@ -1,4 +1,4 @@
-"""Access to Postgres (Supabase) with pgvector. Everything async via asyncpg."""
+"""Access to Postgres (Supabase) with pgvector. All async via asyncpg."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,7 @@ class Database:
             min_size=1,
             max_size=5,
             init=self._init_conn,
-            # Disables the prepared-statement cache -> compatible with the Supabase
+            # Turn off the prepared-statement cache -> compatible with the Supabase
             # pooler (pgbouncer/Supavisor in transaction mode). The perf cost is
             # negligible at our volume.
             statement_cache_size=0,
@@ -206,7 +206,7 @@ class Database:
     async def vote_counts(
         self, user_id: int, platforms: list[str] | None = None
     ) -> tuple[int, int]:
-        """(likes, dislikes) for the user, optionally only from certain platforms."""
+        """(likes, dislikes) for the user, optionally only for certain platforms."""
         async with self.pool.acquire() as c:
             if platforms:
                 row = await c.fetchrow(
@@ -231,7 +231,7 @@ class Database:
         self, user_id: int, query_embedding, k: int = 5,
         platforms: list[str] | None = None,
     ) -> list[asyncpg.Record]:
-        """The k closest ALREADY-VOTED posts, optionally only from `platforms`.
+        """The k nearest ALREADY-VOTED posts, optionally only from `platforms`.
 
         Restricting by platform keeps affinity SEPARATE per bucket (votes on
         repos don't influence news and vice versa).
@@ -275,8 +275,8 @@ class Database:
     ) -> list[asyncpg.Record]:
         """RECALL: posts THIS user liked, by similarity to the query.
 
-        The user_id filter is the privacy invariant — only the user's own 👍
-        come in; other people's votes never appear.
+        Filtering by user_id is the privacy invariant — only the user's own 👍
+        come in; other people's votes never show up.
         """
         where_since = "AND p.published_at > now() - ($4 || ' days')::interval" if since_days else ""
         params: list[Any] = [user_id, query_embedding, limit]
@@ -321,7 +321,7 @@ class Database:
                 )
 
     async def active_focus(self, user_id: int, bucket: str) -> list[asyncpg.Record]:
-        """Current (non-expired) directions for a bucket."""
+        """Current (non-expired) directions of a bucket."""
         async with self.pool.acquire() as c:
             return await c.fetch(
                 """
@@ -335,7 +335,7 @@ class Database:
             )
 
     async def clear_focus(self, user_id: int, bucket: str | None = None) -> int:
-        """Deletes the user's directions (from one bucket, or all). Returns the count."""
+        """Deletes the user's directions (from one bucket, or all of them). Returns the count."""
         async with self.pool.acquire() as c:
             if bucket:
                 row = await c.fetchrow(
@@ -351,41 +351,54 @@ class Database:
                 )
             return int(row["n"])
 
+    async def all_active_focus_topics(self) -> list[str]:
+        """Topics with an active /foco (from any user) — they lower the curator's bar."""
+        async with self.pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT DISTINCT topic FROM focus "
+                "WHERE expires_at IS NULL OR expires_at > now()"
+            )
+        return [r["topic"] for r in rows]
+
     # --------------------------------------------------------------- search
     async def search_pool(
         self, user_id: int, query_embedding, limit: int = 10
     ) -> list[asyncpg.Record]:
         """Semantic search over the CURATED archive: approved + your saved/liked.
 
-        Unlike recall_liked (only 👍): here you get anything good that already
-        passed curation, whether you voted on it or not — so "ask and you find".
-        The `liked` flag marks what you liked.
+        Unlike recall_liked (👍 only): here you get anything good that already
+        passed curation, whether you voted on it or not — so "ask and ye shall
+        find". The `liked` flag marks what you liked.
         """
         async with self.pool.acquire() as c:
-            return await c.fetch(
-                """
-                SELECT p.id, p.source_url, p.author, p.raw_text, p.category,
-                       p.source_platform,
-                       (p.embedding <=> $2) AS distance,
-                       EXISTS (
-                           SELECT 1 FROM votes v
-                           WHERE v.user_id = $1 AND v.post_id = p.id AND v.vote = 1
-                       ) AS liked
-                FROM posts p
-                WHERE p.embedding IS NOT NULL
-                  AND (
-                      p.verdict = 'approved'
-                      OR p.source_platform = 'manual'
-                      OR EXISTS (
-                          SELECT 1 FROM votes v
-                          WHERE v.user_id = $1 AND v.post_id = p.id AND v.vote = 1
+            async with c.transaction():
+                # High ef_search: the 'approved' filter discards many neighbors (the
+                # pool has lots of rejected ones); without it the search comes back nearly empty.
+                await c.execute("SET LOCAL hnsw.ef_search = 200")
+                return await c.fetch(
+                    """
+                    SELECT p.id, p.source_url, p.author, p.raw_text, p.category,
+                           p.source_platform,
+                           (p.embedding <=> $2) AS distance,
+                           EXISTS (
+                               SELECT 1 FROM votes v
+                               WHERE v.user_id = $1 AND v.post_id = p.id AND v.vote = 1
+                           ) AS liked
+                    FROM posts p
+                    WHERE p.embedding IS NOT NULL
+                      AND (
+                          p.verdict = 'approved'
+                          OR p.source_platform = 'manual'
+                          OR EXISTS (
+                              SELECT 1 FROM votes v
+                              WHERE v.user_id = $1 AND v.post_id = p.id AND v.vote = 1
+                          )
                       )
-                  )
-                ORDER BY p.embedding <=> $2
-                LIMIT $3
-                """,
-                user_id, query_embedding, limit,
-            )
+                    ORDER BY p.embedding <=> $2
+                    LIMIT $3
+                    """,
+                    user_id, query_embedding, limit,
+                )
 
     async def recall_voted(
         self, user_id: int, query_embedding, vote: int | None = None,
@@ -393,7 +406,7 @@ class Database:
     ) -> list[asyncpg.Record]:
         """Conversational recall: posts YOU voted on, by similarity to the topic.
 
-        vote=1 -> only 👍; vote=-1 -> only 👎; None -> any vote. Returns v.vote
+        vote=1 -> 👍 only; vote=-1 -> 👎 only; None -> any vote. Returns v.vote
         so the bot can mark ❤️/👎. Scoped by user_id = privacy (only your votes).
         """
         where_vote = "AND v.vote = $4" if vote is not None else ""
@@ -416,7 +429,7 @@ class Database:
 
     # --------------------------------------------------------------- balance
     async def get_balance(self, user_id: int, bucket: str) -> float | None:
-        """Desired fraction of NEW content in this bucket (None = app default)."""
+        """Fraction of NEW content desired in this bucket (None = app default)."""
         async with self.pool.acquire() as c:
             row = await c.fetchrow(
                 "SELECT (settings #>> ARRAY['balance', $2])::real AS frac "
@@ -443,10 +456,10 @@ class Database:
     async def balance_signal(
         self, user_id: int, platforms: list[str]
     ) -> list[asyncpg.Record]:
-        """(vote, delivery affinity_score) for the voted posts in this bucket.
+        """(vote, delivery affinity_score) of the voted posts in this bucket.
 
         Feeds the auto-balancing: votes on LOW-score cards (freshness slots) vs
-        HIGH-score ones (relevance slots) reveal whether the user prefers
+        HIGH-score cards (relevance slots) reveal whether the user likes
         novelty or relevance.
         """
         async with self.pool.acquire() as c:

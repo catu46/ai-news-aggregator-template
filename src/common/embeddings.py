@@ -7,7 +7,7 @@ import voyageai
 
 from .config import Settings
 
-_EMBED_BATCH = 32  # texts per Voyage call (stays within request limits)
+_EMBED_BATCH = 32  # texts per Voyage call (respects request limits)
 
 
 class Embedder:
@@ -17,17 +17,17 @@ class Embedder:
         self.model = settings.embedding_model  # public (e.g. bot when saving a link)
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Post embeddings (input_type='document')."""
+        """Embeddings for posts (input_type='document')."""
         return await self._embed(texts, "document")
 
     async def embed_query(self, text: str) -> list[float]:
-        """Embedding of a search query (input_type='query')."""
+        """Embedding for a search query (input_type='query')."""
         out = await self._embed([text], "query")
         return out[0]
 
     async def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
-        # The Voyage client is synchronous; we run it in a thread so the loop doesn't block.
-        # Batched so we don't blow past the token limit per request.
+        # The Voyage client is synchronous; we run it in a thread so the loop
+        # doesn't block. Batched so we don't blow past the per-request token limit.
         out: list[list[float]] = []
         for i in range(0, len(texts), _EMBED_BATCH):
             chunk = texts[i : i + _EMBED_BATCH]

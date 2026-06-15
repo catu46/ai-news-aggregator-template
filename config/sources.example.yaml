@@ -4,7 +4,7 @@
 # create a new block with their telegram_user_id.
 #
 # Find your telegram_user_id: send /start to the bot (it logs the id) or
-# message @userinfobot on Telegram.
+# talk to @userinfobot on Telegram.
 #
 # HOW TO USE: copy this file to `config/sources.yaml` and fill it with
 # your own values. This .example only has placeholders.
@@ -21,19 +21,19 @@ users:
         - LocalLLaMA
         - MachineLearning
         - dataengineering
-        # - add/remove freely
+        # - add/remove as you like
 
     x:
       # specific accounts (without the "@")
       accounts:
         - karpathy
         - simonw
-        # - add/remove freely
+        # - add/remove as you like
       # advanced searches — X operators: from:, OR, min_faves:, lang:, -filter:replies
       searches:
         - '("autonomous agents" OR agentic) min_faves:50 lang:en -filter:replies'
         - '(RAG OR "vector search") min_faves:50 lang:en -filter:replies'
-        # operators: from:, OR, min_faves:, lang:, -filter:replies — edit freely
+        # operators: from:, OR, min_faves:, lang:, -filter:replies — edit as you like
 
     github:
       # trending repos by topic (Search API). Each item is a query/topic.
@@ -41,12 +41,12 @@ users:
       queries:
         - "AI agents"
         - "MCP server"
-        # - add/remove freely
+        # - add/remove as you like
 
   # --- Example of a 2nd person (uncomment to enable) ---
   # friend1:
   #   telegram_user_id: 111111111
-  #   display_name: "Jane Doe"
+  #   display_name: "John Doe"
   #   reddit:
   #     subreddits: [LocalLLaMA, rust]
   #   x:

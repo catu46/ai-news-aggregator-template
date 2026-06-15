@@ -1,8 +1,8 @@
 """MCP server: exposes YOUR curated archive as tools for Claude.
 
-A THIN shell on top of Database — it reuses exactly what the bot already uses
-(search_pool / recall_voted / active_focus). This way you ask Claude directly
-("what did I like about RAG?") without opening Telegram.
+A THIN shell over the Database — reuses exactly what the bot already uses
+(search_pool / recall_voted / active_focus). This way you ask straight from
+Claude ("what did I like about RAG?") without opening Telegram.
 
 Run it as a local MCP server (stdio) and plug it into any Claude Code/Desktop:
 
@@ -10,8 +10,7 @@ Run it as a local MCP server (stdio) and plug it into any Claude Code/Desktop:
 
 Each person runs THEIR OWN instance (their Supabase, their telegram_user_id), so
 the data never mixes — it's the same multi-tenant isolation as the rest of the
-project. The user is resolved via TELEGRAM_USER_ID (.env) or by the 1st in
-sources.yaml.
+project. The user is resolved via TELEGRAM_USER_ID (.env) or the 1st in sources.yaml.
 
 Identifiers in English; comments in English.
 """
@@ -27,13 +26,13 @@ from ..common.embeddings import Embedder
 
 mcp = FastMCP("acervo-ia")
 
-# Lazy state: connects on the 1st use of a tool and reuses the pool afterwards.
+# Lazy state: connects on the 1st use of a tool and reuses the pool.
 _db: Database | None = None
 _embedder: Embedder | None = None
 
 
 def _resolve_telegram_id() -> int:
-    """Who 'you' are in this instance: TELEGRAM_USER_ID from .env, or 1st in yaml."""
+    """Who 'you' are in this instance: TELEGRAM_USER_ID from .env, or 1st in the yaml."""
     env = os.getenv("TELEGRAM_USER_ID")
     if env:
         return int(env)
@@ -67,9 +66,9 @@ def _headline(raw_text: str | None, width: int = 160) -> str:
 
 @mcp.tool()
 async def buscar_acervo(consulta: str, limite: int = 10) -> str:
-    """Semantic search in the curated archive (approved + what you saved/liked).
+    """Semantic search over the curated archive (approved + what you saved/liked).
 
-    Use it for "is there anything in my archive about X?". ❤️ marks what you liked.
+    Use for "is there anything in my archive about X?". ❤️ marks what you liked.
     """
     db, embedder, user_id = await _ensure()
     vec = await embedder.embed_query(consulta)
@@ -90,8 +89,8 @@ async def buscar_acervo(consulta: str, limite: int = 10) -> str:
 async def lembrar_votos(consulta: str, voto: str = "any", limite: int = 10) -> str:
     """Recalls what YOU voted on about a topic, by similarity.
 
-    voto: "liked" (only 👍), "disliked" (only 👎) or "any" (any vote).
-    Use it for "what was that thing about X that I liked/disliked?".
+    voto: "liked" (👍 only), "disliked" (👎 only) or "any" (any vote).
+    Use for "what was that thing about X that I liked/disliked?".
     """
     db, embedder, user_id = await _ensure()
     vec = await embedder.embed_query(consulta)
@@ -108,7 +107,7 @@ async def lembrar_votos(consulta: str, voto: str = "any", limite: int = 10) -> s
 
 @mcp.tool()
 async def ver_foco() -> str:
-    """Shows the active direction (/foco) of each bucket: 📦 repos and 🗞️ news."""
+    """Shows the active direction (/foco) for each bucket: 📦 repos and 🗞️ news."""
     db, _embedder, user_id = await _ensure()
     lines = []
     for bucket, label in (("repos", "📦 repos"), ("news", "🗞️ news")):
@@ -118,7 +117,7 @@ async def ver_foco() -> str:
 
 
 def main() -> None:
-    """Starts the MCP server in stdio (the default mode for Claude Code/Desktop)."""
+    """Starts the MCP server over stdio (default mode for Claude Code/Desktop)."""
     mcp.run()
 
 

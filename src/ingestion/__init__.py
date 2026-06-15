@@ -1,4 +1,4 @@
-"""Ingestion layer: sources that emit normalized IngestedPost."""
+"""Ingestion layer: sources that emit normalized IngestedPost objects."""
 from .base import IngestionSource
 from .reddit_source import RedditSource
 from .github_source import GitHubSource

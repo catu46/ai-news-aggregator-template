@@ -8,8 +8,8 @@ Auth: twitter-cli reads TWITTER_AUTH_TOKEN/TWITTER_CT0 from the environment
 (headless server) or the cookies from the logged-in browser (on your Mac). We
 inject the 2 tokens into the subprocess env when available, so it works on Railway.
 
-Accounts and searches are a CONTINUOUS feed (not backfill). Everything goes
-through the curator afterward.
+Accounts and searches are a CONTINUOUS feed (not a backfill). Everything goes
+through the curator afterwards.
 """
 from __future__ import annotations
 
@@ -79,11 +79,14 @@ class XSource(IngestionSource):
             for tw in await self._run(["user-posts", handle, "--max", str(self._per_account)]):
                 self._collect(tw, seen, posts)
 
+        # Each search in TWO tabs: Latest (newest) + Top (most engaged) —
+        # freshness and relevance. Dedup by id (seen) covers the overlap.
         for query in self._searches:
-            for tw in await self._run(
-                ["search", query, "-t", "Latest", "--max", str(self._per_search)]
-            ):
-                self._collect(tw, seen, posts)
+            for tab in ("Latest", "Top"):
+                for tw in await self._run(
+                    ["search", query, "-t", tab, "--max", str(self._per_search)]
+                ):
+                    self._collect(tw, seen, posts)
 
         return posts
 
