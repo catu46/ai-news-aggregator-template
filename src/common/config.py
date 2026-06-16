@@ -17,7 +17,7 @@ CONFIG_DIR = ROOT / "config"
 def _env(name: str, default: str | None = None, *, required: bool = False) -> str | None:
     val = os.getenv(name, default)
     if required and not val:
-        raise RuntimeError(f"Missing required environment variable: {name}")
+        raise RuntimeError(f"Required environment variable missing: {name}")
     return val
 
 
@@ -40,7 +40,7 @@ class Settings:
     moonshot_base_url: str
     kimi_model: str
     digest_hour: int               # local hour of the daily delivery (0-23)
-    digest_tz: str                 # IANA time zone for the delivery hour
+    digest_tz: str                 # IANA timezone for the delivery hour
 
 
 def load_settings() -> Settings:

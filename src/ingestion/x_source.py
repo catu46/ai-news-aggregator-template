@@ -1,15 +1,15 @@
 """X/Twitter ingestion via twitter-cli (free mode, cookie-based).
 
-Calls the `twitter` CLI via subprocess:
+Calls the `twitter` CLI through a subprocess:
   - accounts:  twitter user-posts <handle> --max N --json
   - searches:  twitter search "<query>" -t Latest --max N --json
 
 Auth: twitter-cli reads TWITTER_AUTH_TOKEN/TWITTER_CT0 from the environment
-(headless server) or the cookies from the logged-in browser (on your Mac). We
-inject the 2 tokens into the subprocess env when available, so it works on Railway.
+(headless server) or the logged-in browser's cookies (on your Mac). We inject
+both tokens into the subprocess env when available, so it works on Railway.
 
 Accounts and searches are a CONTINUOUS feed (not a backfill). Everything goes
-through the curator afterwards.
+through the curator afterward.
 """
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ class XSource(IngestionSource):
             for tw in await self._run(["user-posts", handle, "--max", str(self._per_account)]):
                 self._collect(tw, seen, posts)
 
-        # Each search in TWO tabs: Latest (newest) + Top (most engaged) —
+        # Each search across TWO tabs: Latest (newest) + Top (most engaged) —
         # freshness and relevance. Dedup by id (seen) covers the overlap.
         for query in self._searches:
             for tab in ("Latest", "Top"):
@@ -105,14 +105,14 @@ class XSource(IngestionSource):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.DEVNULL,  # never waits for input (avoids hangs)
+                stdin=asyncio.subprocess.DEVNULL,  # never waits for input (avoids hanging)
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._env(),
             )
             out, err = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
         except (asyncio.TimeoutError, FileNotFoundError, OSError):
-            logger.exception("x: failed to run %s", " ".join(args))
+            logger.exception("x: failed to execute %s", " ".join(args))
             return []
 
         if proc.returncode != 0:

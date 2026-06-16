@@ -2,8 +2,8 @@
 # Cold-start examples — per user.
 # They bootstrap TWO things:
 #   1) the curator's few-shot (it learns your taste from the 1st message);
-#   2) the recall archive (they enter as preloaded votes: gold=👍 / noise=👎,
-#      origin='seed'), so /buscar already works on day 1.
+#   2) the recall archive (they go in as pre-loaded votes: gold=👍 / noise=👎,
+#      origin='seed'), so /search already works on day 1.
 #
 # Can be a link OR pasted text. 3-5 of each is enough.
 #
@@ -15,11 +15,11 @@ users:
   owner:
     gold:        # "gold" — exactly what you WANT to receive
       - text: "<paste a dense post/discussion you'd love to receive>"
-        # url: "https://..."     # optional, but helps
+        # url: "https://..."     # optional, but it helps
       - text: "<another gold example>"
       - text: "<another gold example>"
 
-    noise:       # "noise" — what the curator SHOULD reject
+    noise:       # "noise" — what the curator MUST reject
       - text: "<paste a basic tutorial / corporate hype / clickbait>"
       - text: "<another noise example>"
       - text: "<another noise example>"

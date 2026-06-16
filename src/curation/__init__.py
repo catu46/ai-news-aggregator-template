@@ -1,4 +1,4 @@
-"""Curation layer: classifies posts into Verdict via a swappable curator.
+"""Curation layer: classifies posts into a Verdict via a swappable curator.
 
 The default curator is `AnthropicCurator` (Haiku 4.5 + Structured Outputs +
 prompt caching), but the `Curator` interface is swappable — a `DeepSeekCurator`

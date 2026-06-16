@@ -4,9 +4,9 @@
 -- Embeddings: Voyage voyage-4-lite, 1024-dim, L2-normalized (cosine == dot)
 -- Curator:    Claude Haiku 4.5 (claude-haiku-4-5)
 --
--- Data model: SHARED POOL of posts (curated once = a QUALITY verdict,
--- user-agnostic). Each person's TASTE lives in per-user votes/deliveries.
--- Adding people does not multiply the cost.
+-- Data model: SHARED POOL of posts (curated once = QUALITY verdict, user-
+-- agnostic). Each person's TASTE lives in per-user votes/deliveries. Adding
+-- more people does not multiply the cost.
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -24,8 +24,8 @@ CREATE TABLE users (
 );
 
 -- ---------------------------------------------------------------------------
--- posts: SHARED POOL. One row per unique post from any source,
--- curated ONCE. No vote columns here (votes are per-user).
+-- posts: SHARED POOL. One row per unique post from any source, curated ONCE.
+-- No vote columns here (voting is per-user).
 -- ---------------------------------------------------------------------------
 CREATE TABLE posts (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -73,7 +73,7 @@ CREATE TABLE posts (
 );
 
 -- ---------------------------------------------------------------------------
--- deliveries: what was DELIVERED to each user (scope of the feed + recall).
+-- deliveries: what was DELIVERED to each user (feed scope + recall).
 -- ---------------------------------------------------------------------------
 CREATE TABLE deliveries (
     id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -87,7 +87,7 @@ CREATE TABLE deliveries (
 
 -- ---------------------------------------------------------------------------
 -- votes: the PER-USER "Gold Standard". UPSERT: 1 vote per (user, post).
--- origin = 'telegram' (click in the bot) | 'seed' (cold-start example).
+-- origin = 'telegram' (bot click) | 'seed' (cold-start example).
 -- ---------------------------------------------------------------------------
 CREATE TABLE votes (
     id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -104,17 +104,18 @@ CREATE TABLE votes (
 );
 
 -- ---------------------------------------------------------------------------
--- focus: temporary feed "direction", per user and per bucket (repos/news).
--- e.g. "for the next 2 days I want news about the AI finance world".
--- Re-ranks delivery toward the topic AND injects the topic into collection (search + repos).
--- One ACTIVE direction per (user, bucket); redirecting replaces the previous one.
+-- focus: a temporary feed "steer", per user and per bucket (repos/news).
+-- E.g. "for the next 2 days I want news about the financial world of AI".
+-- Re-ranks delivery toward the topic AND injects the topic into collection
+-- (search + repos). One ACTIVE steer per (user, bucket); re-steering replaces
+-- the previous one.
 -- ---------------------------------------------------------------------------
 CREATE TABLE focus (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id     BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     bucket      TEXT        NOT NULL CHECK (bucket IN ('repos', 'news')),
     topic       TEXT        NOT NULL,                  -- topic, good for search
-    embedding   vector(1024),                          -- for re-ranking delivery
+    embedding   vector(1024),                          -- to re-rank delivery
     weight      REAL        NOT NULL DEFAULT 1.2,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ                             -- NULL = no expiry
@@ -136,7 +137,7 @@ CREATE TRIGGER votes_set_updated_at BEFORE UPDATE ON votes
 -- ---------------------------------------------------------------------------
 -- Indexes
 -- ---------------------------------------------------------------------------
--- Vector search (recall + affinity). HNSW for incremental inserts on a
+-- Vector search (recall + affinity). HNSW for incremental inserts into a
 -- growing table (not IVFFlat). cosine == dot because the vectors are
 -- L2-normalized; the ORDER BY operator must match: <=> (cosine).
 CREATE INDEX posts_embedding_hnsw ON posts
@@ -157,7 +158,7 @@ CREATE INDEX votes_post_idx      ON votes (post_id);
 -- OPERATIONAL NOTES (not DDL — reference)
 -- =============================================================================
 --
--- DEDUP on ingestion:
+-- DEDUP at ingestion:
 --   INSERT INTO posts (...) VALUES (...)
 --   ON CONFLICT (source_platform, source_id) DO NOTHING;
 --
@@ -165,7 +166,7 @@ CREATE INDEX votes_post_idx      ON votes (post_id);
 --   INSERT INTO votes (user_id, post_id, vote, origin) VALUES (:u, :p, :v, 'telegram')
 --   ON CONFLICT (user_id, post_id) DO UPDATE SET vote = EXCLUDED.vote, updated_at = now();
 --
--- RECALL ("did I recently like something about XPTO?") — per user:
+-- RECALL ("did I like something recent about XPTO?") — per user:
 --   SELECT p.source_url, p.embedding <=> :q AS dist
 --   FROM votes v JOIN posts p ON p.id = v.post_id
 --   WHERE v.user_id = :uid AND v.vote = 1 AND p.embedding IS NOT NULL

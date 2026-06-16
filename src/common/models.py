@@ -25,7 +25,7 @@ class IngestedPost:
 # --------------------------------------------------------------------------
 # Curator verdict — Structured Output schema (Haiku 4.5).
 # IMPORTANT: no numeric (ge/le) or string (min/max length) constraints:
-# Structured Outputs doesn't support them. Range validation is done in the app.
+# Structured Outputs does not support them. Range validation is done in the app.
 # --------------------------------------------------------------------------
 PrimaryCategory = Literal[
     "data_engineering",
@@ -63,8 +63,8 @@ FocusBucket = Literal["repos", "news"]
 
 class FocusItem(BaseModel):
     bucket: FocusBucket               # 'repos' (GitHub) or 'news' (X+Reddit)
-    topic: str                        # short topic, GOOD FOR SEARCH (can be in English)
-    days: int                         # validity in days (0 = use the app default)
+    topic: str                        # short topic, GOOD FOR SEARCH (may be in English)
+    days: int                         # validity in days (0 = use app default)
 
 
 ChatKind = Literal["steer", "recall", "balance", "other"]
@@ -81,4 +81,5 @@ class ChatIntent(BaseModel):
     recall_polarity: RecallPolarity   # liked | disliked | any
     balance_bucket: BalanceBucket     # when kind="balance"
     balance_fresh: float              # 0..1: desired fraction of NEW content
+    balance_reset: bool               # kind="balance": reset the mix to DEFAULT
     reply: str                        # short confirmation/guidance in PT-BR

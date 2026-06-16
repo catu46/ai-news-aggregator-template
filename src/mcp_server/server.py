@@ -1,14 +1,14 @@
 """MCP server: exposes YOUR curated archive as tools for Claude.
 
-A THIN shell over the Database — reuses exactly what the bot already uses
-(search_pool / recall_voted / active_focus). This way you ask straight from
-Claude ("what did I like about RAG?") without opening Telegram.
+A THIN shell over the Database — it reuses exactly what the bot already uses
+(search_pool / recall_voted / active_focus). That way you ask Claude directly
+("what did I like about RAG?") without opening Telegram.
 
 Run it as a local MCP server (stdio) and plug it into any Claude Code/Desktop:
 
     claude mcp add archive -- .venv/bin/python -m src.mcp_server.server
 
-Each person runs THEIR OWN instance (their Supabase, their telegram_user_id), so
+Each person runs THEIR own instance (their Supabase, their telegram_user_id), so
 the data never mixes — it's the same multi-tenant isolation as the rest of the
 project. The user is resolved via TELEGRAM_USER_ID (.env) or the 1st in sources.yaml.
 
@@ -24,9 +24,9 @@ from ..common.config import load_settings, load_sources
 from ..common.db import Database
 from ..common.embeddings import Embedder
 
-mcp = FastMCP("archive-ia")
+mcp = FastMCP("archive-ai")
 
-# Lazy state: connects on the 1st use of a tool and reuses the pool.
+# Lazy state: connects on the 1st use of a tool and reuses the pool afterward.
 _db: Database | None = None
 _embedder: Embedder | None = None
 
@@ -68,7 +68,7 @@ def _headline(raw_text: str | None, width: int = 160) -> str:
 async def search_archive(query: str, limit: int = 10) -> str:
     """Semantic search over the curated archive (approved + what you saved/liked).
 
-    Use for "is there anything in my archive about X?". ❤️ marks what you liked.
+    Use it for "is there anything in my archive about X?". ❤️ marks what you liked.
     """
     db, embedder, user_id = await _ensure()
     vec = await embedder.embed_query(query)
@@ -87,10 +87,10 @@ async def search_archive(query: str, limit: int = 10) -> str:
 
 @mcp.tool()
 async def recall_votes(query: str, vote: str = "any", limit: int = 10) -> str:
-    """Recalls what YOU voted on about a topic, by similarity.
+    """Recalls what YOU voted on a topic, by similarity.
 
     vote: "liked" (👍 only), "disliked" (👎 only) or "any" (any vote).
-    Use for "what was that thing about X that I liked/disliked?".
+    Use it for "what was that thing about X I liked/disliked?".
     """
     db, embedder, user_id = await _ensure()
     vec = await embedder.embed_query(query)
@@ -107,7 +107,7 @@ async def recall_votes(query: str, vote: str = "any", limit: int = 10) -> str:
 
 @mcp.tool()
 async def see_focus() -> str:
-    """Shows the active direction (/focus) for each bucket: 📦 repos and 🗞️ news."""
+    """Shows the active direction (/focus) of each bucket: 📦 repos and 🗞️ news."""
     db, _embedder, user_id = await _ensure()
     lines = []
     for bucket, label in (("repos", "📦 repos"), ("news", "🗞️ news")):

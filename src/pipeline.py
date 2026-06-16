@@ -2,20 +2,19 @@
 
 Runs as `python -m src.pipeline`. Idempotent and safe to run on a schedule
 (cron on Railway): each step only touches what is still pending in the database,
-and deduplication by (source_platform, source_id) happens at upsert time.
+and deduplication by (source_platform, source_id) happens on upsert.
 
 Steps:
     1. Setup    — load_settings, connect the Database, build the Embedder.
-    2. Ingest   — collection from Reddit + GitHub + X (one source per user, built
+    2. Ingest   — collect from Reddit + GitHub + X (one source per user, built
                   only when there are targets), with the active /focus topics
                   injected into collection (repos→GitHub; news→Reddit+X).
-    3. Embed    — embeds posts without an embedding, in batches.
+    3. Embed    — embed posts without an embedding, in batches.
     4. Curate   — global quality verdict via a swappable curator (make_curator;
-                  Anthropic Haiku by default, or Kimi), passing the active /focus
-                  interests. Respects the spend cap (BudgetExceeded).
+                  Anthropic Haiku by default, or Kimi), passing the active
+                  /focus interests. Respects the spending cap (BudgetExceeded).
 
-Delivery to Telegram does NOT happen here — it is the responsibility of the bot's
-JobQueue.
+Delivery to Telegram does NOT happen here — that's the bot's JobQueue's job.
 """
 from __future__ import annotations
 
@@ -29,15 +28,15 @@ from .ingestion.reddit_source import RedditSource
 from .ingestion.github_source import GitHubSource
 from .ingestion.x_source import XSource
 
-# The curator is still a sibling module (src/curation/). The pipeline only
-# orchestrates it: AnthropicCurator.classify(...) -> Verdict | None and
-# BudgetExceeded are expected.
+# The curator is still a sibling module (src/curation/). The pipeline just
+# orchestrates it: it expects AnthropicCurator.classify(...) -> Verdict | None
+# and BudgetExceeded.
 from .curation.curator import BudgetExceeded, Curator, make_curator
 
 logger = logging.getLogger("pipeline")
 
-# Batch size when draining the pending queue. Keeps memory usage predictable and
-# provides natural log/progress checkpoints during long runs.
+# Batch size when draining the pending queue. Keeps memory usage predictable
+# and gives natural log/progress points during long runs.
 EMBED_BATCH = 100
 CURATION_BATCH = 100
 
@@ -48,8 +47,8 @@ CURATION_BATCH = 100
 async def run_ingestion(db: Database) -> int:
     """Collect from the feeds and upsert. Returns the count of NEW posts.
 
-    Today, Reddit only. Builds one RedditSource per user (from the subreddits
-    declared in sources.yaml) and uses the global reddit_user_agent from settings.
+    Builds one source per user (from the subreddits/accounts/queries declared in
+    sources.yaml) and uses the global reddit_user_agent from settings.
     """
     settings = load_settings()
     sources = load_sources()
@@ -57,8 +56,8 @@ async def run_ingestion(db: Database) -> int:
     new_count = 0
     for user in sources:
         # Active directions (/focus) inject topics into COLLECTION — on top of
-        # re-ranking delivery in the bot. This way the focus actually PULLS in new
-        # content, not just reorders what is already in the pool.
+        # re-ranking delivery in the bot. This way focus actually PULLS in new
+        # content, instead of just reordering what's already in the pool.
         user_id = await db.get_or_create_user(user.telegram_user_id, user.display_name)
         repos_focus = [r["topic"] for r in await db.active_focus(user_id, "repos")]
         news_focus = [r["topic"] for r in await db.active_focus(user_id, "news")]
@@ -68,7 +67,7 @@ async def run_ingestion(db: Database) -> int:
             reddit = RedditSource(
                 subreddits=user.subreddits,
                 user_agent=settings.reddit_user_agent,
-                searches=news_focus,  # /focus topics (news) also search Reddit
+                searches=news_focus,  # /focus (news) topics also search on Reddit
             )
             new_count += await _ingest_source(db, reddit, user_key=user.key)
 
@@ -97,9 +96,9 @@ async def run_ingestion(db: Database) -> int:
 
 
 async def _ingest_source(db: Database, source, *, user_key: str) -> int:
-    """Run a source, upsert each post, and count the genuinely new ones.
+    """Run a source, upsert each post, and count the ones that are actually new.
 
-    Failures of a single source (network, 429, etc.) are logged and isolated —
+    Failures from a single source (network, 429, etc.) are logged and isolated —
     they don't bring down the cycle for the other sources/users.
     """
     try:
@@ -112,13 +111,13 @@ async def _ingest_source(db: Database, source, *, user_key: str) -> int:
     for post in posts:
         try:
             post_id = await db.upsert_post(post)
-        except Exception:  # noqa: BLE001 — isolate per-post database failure
+        except Exception:  # noqa: BLE001 — isolate per-post DB failure
             logger.exception(
-                "ingest[%s/%s]: upsert failed for %s",
+                "ingest[%s/%s]: upsert of %s failed",
                 user_key, source.name, post.source_id,
             )
             continue
-        if post_id is not None:  # None = duplicate (dedup in the database)
+        if post_id is not None:  # None = duplicate (dedup in the DB)
             new_count += 1
 
     logger.info(
@@ -142,7 +141,7 @@ async def run_embedding(db: Database, embedder: Embedder, settings) -> int:
         texts = [r["raw_text"] for r in pending]
         try:
             vectors = await embedder.embed_documents(texts)
-        except Exception:  # noqa: BLE001 — embedding provider failure
+        except Exception:  # noqa: BLE001 — embeddings provider failure
             logger.exception("embed: batch of %d post(s) failed; aborting step", len(pending))
             break
 
@@ -150,12 +149,12 @@ async def run_embedding(db: Database, embedder: Embedder, settings) -> int:
             try:
                 await db.set_embedding(record["id"], vector, settings.embedding_model)
                 total += 1
-            except Exception:  # noqa: BLE001 — isolate per-post database failure
-                logger.exception("embed: failed to store embedding for post %s", record["id"])
+            except Exception:  # noqa: BLE001 — isolate per-post DB failure
+                logger.exception("embed: failed to write embedding for post %s", record["id"])
 
-        logger.info("embed: batch of %d stored (accumulated %d)", len(pending), total)
+        logger.info("embed: batch of %d written (running total %d)", len(pending), total)
 
-        # If the database returned fewer than a full batch, the queue is empty.
+        # If the DB returned fewer than a full batch, the queue is empty.
         if len(pending) < EMBED_BATCH:
             break
 
@@ -169,9 +168,9 @@ async def run_embedding(db: Database, embedder: Embedder, settings) -> int:
 async def run_curation(db: Database, curator: Curator) -> int:
     """Classify pending posts via Haiku. Returns the total classified.
 
-    GLOBAL quality verdict: there is no user signal here, so
+    GLOBAL quality verdict: there's no user signal here, so
     similarity_signal=None. On BudgetExceeded, the step shuts down gracefully
-    (pending posts are left for the next cycle).
+    (the pending posts are left for the next cycle).
     """
     total = 0
     try:
@@ -184,9 +183,9 @@ async def run_curation(db: Database, curator: Curator) -> int:
             break
 
         for record in pending:
-            # Light context (author/subreddit) at the start of the text — helps the
-            # curator without departing from the classify(post_text, similarity_signal)
-            # signature.
+            # Lightweight context (author/subreddit) at the start of the text —
+            # helps the curator without straying from the
+            # classify(post_text, similarity_signal) signature.
             meta = record["metadata"] or {}
             header_bits = [f"SOURCE: {record['source_platform']}"]
             if record["author"]:
@@ -198,11 +197,11 @@ async def run_curation(db: Database, curator: Curator) -> int:
                 verdict = await curator.classify(
                     post_text=prefix + (record["raw_text"] or ""),
                     similarity_signal=None,  # global verdict: no user signal
-                    interests=interests,     # active topics (/focus) lower the bar
+                    interests=interests,     # active topics (/focus) loosen the bar
                 )
             except BudgetExceeded as exc:
-                # Monthly spend cap reached: stop curating gracefully.
-                logger.warning("curate: spend cap reached (%s); ending step", exc)
+                # Monthly spending cap reached: stop curating gracefully.
+                logger.warning("curate: spending cap reached (%s); ending step", exc)
                 logger.info("curate: %d post(s) classified before the cap", total)
                 return total
             except Exception:  # noqa: BLE001 — API/parse error on a single post
@@ -218,7 +217,7 @@ async def run_curation(db: Database, curator: Curator) -> int:
             await db.mark_curation(record["id"], verdict, curator_model_of(curator))
             total += 1
 
-        logger.info("curate: batch processed (accumulated %d)", total)
+        logger.info("curate: batch processed (running total %d)", total)
 
         if len(pending) < CURATION_BATCH:
             break
@@ -228,10 +227,10 @@ async def run_curation(db: Database, curator: Curator) -> int:
 
 
 def curator_model_of(curator: Curator) -> str:
-    """Curator model name to store in the curator_model columns.
+    """Name of the curator's model, to record in the curator_model columns.
 
-    Tolerant of the curator's final interface: uses .model if exposed, otherwise a
-    generic label. Keeps the pipeline decoupled from internal details.
+    Tolerant of the curator's final interface: uses .model if exposed, otherwise
+    a generic label. Keeps the pipeline decoupled from internal details.
     """
     return getattr(curator, "model", "curator")
 
@@ -253,7 +252,7 @@ async def main() -> None:
     curator = make_curator(settings)
 
     try:
-        # 2. Ensure each user exists (idempotent).
+        # 2. Make sure every user exists (idempotent).
         for user in load_sources():
             await db.get_or_create_user(user.telegram_user_id, user.display_name)
 

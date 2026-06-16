@@ -1,12 +1,12 @@
 """Reddit ingestion via the public RSS/Atom feed (/r/<sub>/new/.rss).
 
-The .json endpoint started returning 403 (a Reddit block, Jun 2026) even with a
+The .json endpoint started returning 403 (Reddit block, Jun 2026) even with a
 browser User-Agent. The .rss feed still responds 200 with a simple User-Agent —
-so we use it. We parse the Atom feed with feedparser and extract the body text
+so we use it. We parse the Atom with feedparser and extract the body text
 (which comes as HTML) with BeautifulSoup.
 
 Uses the multireddit trick ('sub1+sub2+...') to grab everything in a single
-request (lower chance of a 429). Dedup by source_id happens in the database.
+request (less chance of a 429). Dedup by source_id happens in the database.
 
 Caveat: unauthenticated traffic from a datacenter IP (e.g. Railway) may be
 blocked/throttled by Reddit. If that happens, you can route Reddit through an
@@ -25,8 +25,8 @@ from ..common.models import IngestedPost
 from .base import IngestionSource
 
 REDDIT_BASE = "https://www.reddit.com"
-# Variants of the TOPIC search (focus): top over growing windows + "hot".
-# The database deduplicates the overlap; each variant is a separate request.
+# TOPIC search variants (focus): top over growing windows + "hot"
+# (featured). The database deduplicates the overlap; each variant is a separate request.
 _REDDIT_SEARCH_VARIANTS = (
     {"sort": "top", "t": "day"},
     {"sort": "top", "t": "week"},
@@ -65,9 +65,9 @@ class RedditSource(IngestionSource):
                     client, f"{REDDIT_BASE}/r/{multi}/new/.rss",
                     {"limit": str(self._limit)},
                 )
-            # TOPIC searches (focus): top day/week/month + "hot" —
-            # relevance by upvotes across multiple time scales. The RSS doesn't carry
-            # the score (Reddit sorts server-side); the database dedups the overlap.
+            # TOPIC searches (focus): top day/week/month + "hot" (featured) —
+            # relevance by upvotes across several time scales. The RSS doesn't carry the
+            # score (Reddit sorts server-side); the database deduplicates the overlap.
             for q in self._searches:
                 for variant in _REDDIT_SEARCH_VARIANTS:
                     posts += await self._fetch_feed(
@@ -79,14 +79,14 @@ class RedditSource(IngestionSource):
     async def _fetch_feed(
         self, client: httpx.AsyncClient, url: str, params: dict
     ) -> list[IngestedPost]:
-        """GET + parse ONE Reddit RSS feed. Isolates failures (one feed won't take down the rest)."""
+        """GET + parse of a SINGLE Reddit RSS feed. Isolates failures (one feed doesn't take down the rest)."""
         try:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
         except Exception:  # noqa: BLE001 — feed unavailable/throttled -> skip
             return []
         feed = feedparser.parse(resp.text)
-        # real POSTS only (link /comments/) — search sometimes returns communities.
+        # only real POSTS (link /comments/) — search sometimes returns communities.
         return [
             self._to_post(e)
             for e in feed.entries[: self._limit]
@@ -99,7 +99,7 @@ class RedditSource(IngestionSource):
         raw_id = entry.get("id") or entry.get("link") or ""
         source_id = raw_id.rsplit("/", 1)[-1].replace("t3_", "") or raw_id
 
-        # subreddit from the link (the feed mixes the multireddit's subs)
+        # subreddit from the link (the feed mixes the multireddit's subs together)
         link = entry.get("link") or ""
         m = _SUB_RE.search(link)
         subreddit = m.group(1) if m else None

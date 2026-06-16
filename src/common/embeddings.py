@@ -26,8 +26,8 @@ class Embedder:
         return out[0]
 
     async def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
-        # The Voyage client is synchronous; we run it in a thread so the loop
-        # doesn't block. Batched so we don't blow past the per-request token limit.
+        # The Voyage client is synchronous; we run it in a thread so we don't block the loop.
+        # Batched so we don't blow past the token limit per request.
         out: list[list[float]] = []
         for i in range(0, len(texts), _EMBED_BATCH):
             chunk = texts[i : i + _EMBED_BATCH]

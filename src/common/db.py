@@ -1,4 +1,4 @@
-"""Access to Postgres (Supabase) with pgvector. All async via asyncpg."""
+"""Access to Postgres (Supabase) with pgvector. Everything async via asyncpg."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,12 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 from .models import IngestedPost, Verdict
+
+# Relevance floor for semantic SEARCH: results with a cosine distance above this
+# are considered off-topic and discarded (if nothing passes -> "nothing found",
+# instead of returning the least-distant neighbor). Calibrated with real data:
+# requested topic ~0.4-0.51, off-topic ~0.6-0.8.
+_RELEVANCE_MAX_DIST = 0.55
 
 
 class Database:
@@ -21,7 +27,7 @@ class Database:
             min_size=1,
             max_size=5,
             init=self._init_conn,
-            # Turn off the prepared-statement cache -> compatible with the Supabase
+            # Turns off the prepared-statement cache -> compatible with the Supabase
             # pooler (pgbouncer/Supavisor in transaction mode). The perf cost is
             # negligible at our volume.
             statement_cache_size=0,
@@ -141,7 +147,7 @@ class Database:
         """Approved posts not yet delivered to this user.
 
         `max_age_days`: if set, ignores posts published more than N days ago
-        (keeps those WITHOUT a date) — feed freshness.
+        (keeps the ones WITHOUT a date) — feed freshness.
         """
         where_age = (
             "AND (p.published_at IS NULL "
@@ -206,7 +212,7 @@ class Database:
     async def vote_counts(
         self, user_id: int, platforms: list[str] | None = None
     ) -> tuple[int, int]:
-        """(likes, dislikes) for the user, optionally only for certain platforms."""
+        """(likes, dislikes) for the user, optionally only from certain platforms."""
         async with self.pool.acquire() as c:
             if platforms:
                 row = await c.fetchrow(
@@ -321,7 +327,7 @@ class Database:
                 )
 
     async def active_focus(self, user_id: int, bucket: str) -> list[asyncpg.Record]:
-        """Current (non-expired) directions of a bucket."""
+        """Current (non-expired) directions for a bucket."""
         async with self.pool.acquire() as c:
             return await c.fetch(
                 """
@@ -335,7 +341,7 @@ class Database:
             )
 
     async def clear_focus(self, user_id: int, bucket: str | None = None) -> int:
-        """Deletes the user's directions (from one bucket, or all of them). Returns the count."""
+        """Deletes the user's directions (for one bucket, or all). Returns the count."""
         async with self.pool.acquire() as c:
             if bucket:
                 row = await c.fetchrow(
@@ -352,7 +358,7 @@ class Database:
             return int(row["n"])
 
     async def all_active_focus_topics(self) -> list[str]:
-        """Topics with an active /focus (from any user) — they lower the curator's bar."""
+        """Topics with an active /focus (from any user) — they loosen the curator's bar."""
         async with self.pool.acquire() as c:
             rows = await c.fetch(
                 "SELECT DISTINCT topic FROM focus "
@@ -362,20 +368,21 @@ class Database:
 
     # --------------------------------------------------------------- search
     async def search_pool(
-        self, user_id: int, query_embedding, limit: int = 10
+        self, user_id: int, query_embedding, limit: int = 10,
+        max_dist: float = _RELEVANCE_MAX_DIST,
     ) -> list[asyncpg.Record]:
         """Semantic search over the CURATED archive: approved + your saved/liked.
 
         Unlike recall_liked (👍 only): here you get anything good that already
-        passed curation, whether you voted on it or not — so "ask and ye shall
-        find". The `liked` flag marks what you liked.
+        passed curation, whether you voted or not — so "ask and you'll find".
+        The `liked` flag marks what you liked.
         """
         async with self.pool.acquire() as c:
             async with c.transaction():
-                # High ef_search: the 'approved' filter discards many neighbors (the
-                # pool has lots of rejected ones); without it the search comes back nearly empty.
+                # high ef_search: the 'approved' filter discards many neighbors (the
+                # pool has a lot of rejected); without it the search comes back nearly empty.
                 await c.execute("SET LOCAL hnsw.ef_search = 200")
-                return await c.fetch(
+                rows = await c.fetch(
                     """
                     SELECT p.id, p.source_url, p.author, p.raw_text, p.category,
                            p.source_platform,
@@ -399,10 +406,12 @@ class Database:
                     """,
                     user_id, query_embedding, limit,
                 )
+        # relevance floor: discards off-topic (high distance)
+        return [r for r in rows if float(r["distance"]) < max_dist]
 
     async def recall_voted(
         self, user_id: int, query_embedding, vote: int | None = None,
-        limit: int = 10,
+        limit: int = 10, max_dist: float = _RELEVANCE_MAX_DIST,
     ) -> list[asyncpg.Record]:
         """Conversational recall: posts YOU voted on, by similarity to the topic.
 
@@ -414,7 +423,7 @@ class Database:
         if vote is not None:
             params.append(vote)
         async with self.pool.acquire() as c:
-            return await c.fetch(
+            rows = await c.fetch(
                 f"""
                 SELECT p.id, p.source_url, p.author, p.raw_text, p.category,
                        v.vote AS vote, (p.embedding <=> $2) AS distance
@@ -426,10 +435,12 @@ class Database:
                 """,
                 *params,
             )
+        # relevance floor: discards off-topic (high distance)
+        return [r for r in rows if float(r["distance"]) < max_dist]
 
     # --------------------------------------------------------------- balance
     async def get_balance(self, user_id: int, bucket: str) -> float | None:
-        """Fraction of NEW content desired in this bucket (None = app default)."""
+        """Desired fraction of NEW content in this bucket (None = app default)."""
         async with self.pool.acquire() as c:
             row = await c.fetchrow(
                 "SELECT (settings #>> ARRAY['balance', $2])::real AS frac "
@@ -439,7 +450,7 @@ class Database:
         return None if row is None or row["frac"] is None else float(row["frac"])
 
     async def set_balance(self, user_id: int, bucket: str, fresh_fraction: float) -> None:
-        """Writes the bucket's freshness fraction into users.settings->balance->bucket."""
+        """Writes the bucket's freshness fraction to users.settings->balance->bucket."""
         async with self.pool.acquire() as c:
             await c.execute(
                 """
@@ -453,14 +464,29 @@ class Database:
                 user_id, bucket, float(fresh_fraction),
             )
 
+    async def clear_balance(self, user_id: int, bucket: str | None = None) -> None:
+        """Removes the mix preference -> reverts to the default (FRESH_SLOTS)."""
+        async with self.pool.acquire() as c:
+            if bucket:
+                await c.execute(
+                    "UPDATE users SET settings = settings #- ARRAY['balance', $2] "
+                    "WHERE id = $1",
+                    user_id, bucket,
+                )
+            else:
+                await c.execute(
+                    "UPDATE users SET settings = settings - 'balance' WHERE id = $1",
+                    user_id,
+                )
+
     async def balance_signal(
         self, user_id: int, platforms: list[str]
     ) -> list[asyncpg.Record]:
         """(vote, delivery affinity_score) of the voted posts in this bucket.
 
-        Feeds the auto-balancing: votes on LOW-score cards (freshness slots) vs
-        HIGH-score cards (relevance slots) reveal whether the user likes
-        novelty or relevance.
+        Feeds the auto-balancing: votes on LOW-score cards (freshness slots)
+        vs HIGH (relevance slots) reveal whether the user likes novelty or
+        relevance.
         """
         async with self.pool.acquire() as c:
             return await c.fetch(

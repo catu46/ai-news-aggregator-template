@@ -4,17 +4,17 @@ This folder holds the project's **hand-editable configuration**: *where* the bot
 
 ## Files
 
-- **`sources.example.yaml`** → template of the monitored sources, per user. Structure: `users:` → one block per person (e.g. `owner`) with:
+- **`sources.example.yaml`** → template of monitored sources, per user. Structure: `users:` → one block per person (e.g. `owner`) with:
   - `telegram_user_id` (your numeric Telegram id — get it from `@userinfobot` or by sending `/start` to the bot) and `display_name`;
   - `reddit.subreddits` — list of followed subreddits (without the `r/`);
   - `x.accounts` — followed X accounts (without the `@`) — and `x.searches` — advanced searches using X operators (`from:`, `OR`, `min_faves:`, `lang:`, `-filter:replies`);
-  - `github.queries` — list of topics/queries for GitHub's Search API (keywords + operators like `language:`, `topic:`).
-  - You can add a 2nd person by uncommenting the `friend1` block at the end of the file. **Connection:** this is what defines the "capture radius" of each platform's collector; every item turns into a call to the Reddit/X/GitHub APIs.
+  - `github.queries` — list of topics/queries for the GitHub Search API (keywords + operators like `language:`, `topic:`).
+  - You can add a 2nd person by uncommenting the `friend1` block at the end of the file. **Connection:** this is what defines the "capture radius" of each platform's collector; each item becomes a call to the Reddit/X/GitHub APIs.
 
-- **`seeds.example.yaml`** → template of the cold-start examples, per user. Structure: `users:` → one block per person with two lists:
-  - `gold` — examples of what you **want** to receive (a dense post/discussion); accepts `text:` (pasted) and an optional `url:`;
-  - `noise` — examples of what the curator **should reject** (basic tutorial, hype, clickbait).
-  - 3–5 of each is enough. **Connection:** it bootstraps two things at once — (1) the curator's *few-shot* (it already filters with your taste from the 1st message) and (2) the recall archive, entering as preloaded votes (`gold`=👍 / `noise`=👎, `origin='seed'`), so `/search` already works on day 1.
+- **`seeds.example.yaml`** → template of cold-start examples, per user. Structure: `users:` → one block per person with two lists:
+  - `gold` — examples of what you **want** to receive (dense post/discussion); accepts `text:` (pasted) and an optional `url:`;
+  - `noise` — examples of what the curator **must reject** (basic tutorial, hype, clickbait).
+  - 3–5 of each is enough. **Connection:** it bootstraps two things at once — (1) the curator's *few-shot* (it already filters by your taste from the 1st message) and (2) the recall archive, going in as pre-loaded votes (`gold`=👍 / `noise`=👎, `origin='seed'`), so `/search` already works on day 1.
 
 ## How to use (onboarding)
 
@@ -23,4 +23,4 @@ This folder holds the project's **hand-editable configuration**: *where* the bot
    - `config/seeds.example.yaml` → `config/seeds.yaml`
 2. Fill the real files with your values (subreddits, accounts, queries, gold/noise examples).
 3. The real files **carry personal data** (your `telegram_user_id`, your interests). In a clean fork / public repo, **gitignore them** (`config/sources.yaml`, `config/seeds.yaml`) and keep only the `.example` files versioned.
-4. **Deploy on Railway** (which deploys via git): the app needs to see the config at runtime, so in **your private repo** the real files **have to be in git** (or you inject the config via environment variables). In short: `.example` = public and safe; real = private, in git only if the repo is private, otherwise via variables.
+4. **Deploy on Railway** (which deploys via git): the app needs to see the config at runtime, so in **your private repo** the real files **have to be in git** (or you inject the config via environment variables). In short: `.example` = public and safe; real ones = private, in git only if the repo is private, otherwise via variables.

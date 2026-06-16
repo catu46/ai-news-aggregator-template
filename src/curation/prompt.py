@@ -2,8 +2,8 @@
 
 `RUBRIC` is the STATIC system block. It is deliberately long (>= 4096 tokens,
 Haiku 4.5's cache floor) so that prompt caching kicks in: the system prefix is
-identical on every call, so from the 2nd request onward it is served at ~0.1x of
-the input price. The padding is NOT random filler — they are worked examples
+identical on every call, so from the 2nd request on it is served at ~0.1x the
+input price. The padding is NOT random filler — they are worked examples
 (approve/reject) that also improve the classifier's calibration.
 """
 from __future__ import annotations
@@ -27,9 +27,9 @@ verdict (not of the post's quality). The one-line rationale is one terse
 sentence a busy engineer can scan. The summary is a 1-2 sentence plain-language
 digest of what the post is ABOUT and its key takeaway, written for a senior
 engineer skimming a feed — factual, specific, no fluff, no marketing tone.
-Always fill the summary (even for rejects). ALWAYS write the summary in English,
-regardless of the post's language. Keep every OTHER field (verdict, categories,
-reasons, one_line_rationale) exactly as specified.
+Always fill the summary (even for rejects). ALWAYS write the summary in
+English, regardless of the post's language. Keep every OTHER field (verdict,
+categories, reasons, one_line_rationale) exactly as specified.
 
 =====================================================================
 WHAT TO APPROVE  (verdict = "approve")
@@ -164,7 +164,7 @@ POST:
 VERDICT:
   {"verdict": "approve", "confidence": 0.93,
    "primary_category": "data_engineering", "reject_reason": "none",
-   "summary": "A team cut ~70% of Iceberg compaction cost with a size-threshold
+   "summary": "A team cut Iceberg compaction cost by ~70% with a size-threshold
    bin-pack and sorting on the filter column, and flags a manifest-rewrite bug
    that double-counted deletes.",
    "one_line_rationale": "Concrete table-format internals with a real fix, a
@@ -420,8 +420,8 @@ RUBRIC = _CORE + "\n" + _EXAMPLES
 
 
 # --------------------------------------------------------------------------
-# User message (VOLATILE part of the prompt — comes AFTER the cached prefix).
-# Includes the optional similarity signal coming from RAG/seeds.
+# User message (the VOLATILE part of the prompt — comes AFTER the cached
+# prefix). Includes the optional similarity signal coming from RAG/seeds.
 # --------------------------------------------------------------------------
 def build_user_message(
     raw_text: str,
@@ -430,11 +430,11 @@ def build_user_message(
     similarity_signal: str | None = None,
     interests: list[str] | None = None,
 ) -> str:
-    """Builds the content of the user turn to classify.
+    """Assembles the content of the user turn to be classified.
 
-    `similarity_signal` is a short, optional hint (e.g., "similar to posts the
+    `similarity_signal` is a short, optional hint (e.g. "similar to posts the
     user liked" or "close to 'noise' examples"). We treat it as a hint, not an
-    order — the verdict belongs to the curator.
+    order — the verdict is the curator's.
     """
     parts: list[str] = ["Classify the following post. Respond only with the verdict."]
 
@@ -477,6 +477,6 @@ def _format_metadata_hints(metadata: dict[str, Any]) -> str:
     picked = {k: metadata[k] for k in interesting if k in metadata and metadata[k] not in (None, "")}
     if not picked:
         return ""
-    # Compact, deterministic JSON (doesn't affect cache — it's in the volatile
-    # turn, but we keep it predictable for hygiene).
+    # Compact, deterministic JSON (doesn't affect the cache — it's in the
+    # volatile turn, but we keep it predictable for hygiene).
     return json.dumps(picked, ensure_ascii=False, sort_keys=True)

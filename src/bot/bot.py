@@ -5,12 +5,12 @@ Responsibilities of this module:
     loaded from config/sources.yaml. It is multi-user-ready: each update is
     resolved to the internal user_id via get_or_create_user.
   - Deliver approved, not-yet-delivered posts (deliver_pending), both
-    via JobQueue (once/day, in 2 buckets) and on demand via /feed.
+    via JobQueue (once a day, in 2 buckets) and on demand via /feed.
   - Record 👍/👎 votes coming from the inline buttons (CallbackQueryHandler).
-  - Semantic search over the posts the user themselves liked (/search).
+  - Semantic search over the posts the user liked (/search).
 
 Shared state (Database + Embedder + allowlist) lives in
-application.bot_data, instantiated only once at startup.
+application.bot_data, instantiated once at startup.
 
 Run with:  python -m src.bot.bot
 """
@@ -48,37 +48,37 @@ from ..pipeline import run_curation, run_embedding, run_ingestion
 
 logger = logging.getLogger(__name__)
 
-# How much of raw_text we show on each delivery card.
+# How much of raw_text we show in each delivery card.
 TEXT_PREVIEW_CHARS = 500
-# Automatic digest: once/day at a FIXED TIME (DIGEST_HOUR/DIGEST_TZ) — a
+# Automatic digest: once a day at a FIXED TIME (DIGEST_HOUR/DIGEST_TZ) — a
 # morning "mini-newspaper". /feed delivers on demand at any time.
 # Interval of the pipeline job (ingest + embed + curate) running INSIDE the bot.
 PIPELINE_INTERVAL_SECONDS = 30 * 60
-# How many results the semantic search returns.
+# How many results semantic search returns.
 SEARCH_LIMIT = 10
-# Affinity: uses your 👍/👎 ONLY to RANK the feed (👎 down, 👍 up).
+# Affinity: uses your 👍/👎 ONLY to RANK the feed (👎 sinks, 👍 rises).
 # Nothing is hidden — all approved content ends up delivered, just in order.
-MIN_VOTES_FOR_AFFINITY = 1        # enables ranking starting from the 1st vote
+MIN_VOTES_FOR_AFFINITY = 1        # turns ranking on starting from the 1st vote
 
 # Daily digest in 2 buckets: (header, source platforms, cap per digest).
 REPOS_PER_DIGEST = 5
 NEWS_PER_DIGEST = 12
 # (key, header, source platforms, cap per digest). The key matches
-# focus.bucket — it's what links the "steering" (/focus) to the right bucket.
+# focus.bucket — it's what links the "direction" (/focus) to the right bucket.
 BUCKETS = [
     ("repos", "📦 TRENDING REPOS", ("github",), REPOS_PER_DIGEST),
     ("news", "🗞️ WHAT PEOPLE ARE TALKING ABOUT", ("reddit", "twitter"), NEWS_PER_DIGEST),
 ]
 # Balances NEW vs RELEVANT: within each bucket's cap, this reserve goes
-# to the NEWEST; the rest goes to the most relevant (affinity + focus). This
-# way fresh content is never buried, and "old but relevant" still shows up.
+# to the NEWEST; the rest goes to the most relevant (affinity + focus). This way
+# fresh content is never buried, and "old but relevant" also shows up.
 FRESH_SLOTS = {"repos": 2, "news": 4}
-# Map bucket -> cap (derived from BUCKETS), to compute the default freshness fraction.
+# Bucket -> cap map (derived from BUCKETS), to compute the default freshness fraction.
 _BUCKET_CAP = {key: cap for key, _h, _p, cap in BUCKETS}
-# Freshness: don't deliver anything published more than N days ago (keeps dateless posts).
+# Freshness: never delivers anything published more than N days ago (keeps undated posts).
 DELIVERY_MAX_AGE_DAYS = 30
 # Auto-balancing: learns the new×relevant mix from YOUR votes. Only kicks in
-# with enough signal and runs once/day (in the delivery job, NOT in /feed). Small
+# with enough signal and runs once a day (in the delivery job, NOT in /feed). Small
 # step (EMA), so a manual adjustment via chat dominates for several days.
 AUTO_BALANCE_MIN_VOTES = 6
 AUTO_BALANCE_STEP = 0.15
@@ -86,7 +86,7 @@ AUTO_BALANCE_BOUNDS = (0.15, 0.60)
 # Page reader (clean markdown, no auth) for the "paste a link" feature.
 JINA_BASE = "https://r.jina.ai/"
 URL_RE = re.compile(r"https?://[^\s]+")
-# Char limit stored/embedded for a manually saved link.
+# Char limit stored/embedded from a manually saved link.
 MANUAL_MAX_CHARS = 8000
 
 # Keys used in application.bot_data (avoids loose strings throughout the code).
@@ -111,7 +111,7 @@ def _embedder(context: ContextTypes.DEFAULT_TYPE) -> Embedder:
 
 
 def _is_allowed(context: ContextTypes.DEFAULT_TYPE, telegram_user_id: int | None) -> bool:
-    """Locks the bot to the allowlist. No id (e.g. channel) -> denied."""
+    """Locks the bot to the allowlist. No id (e.g. a channel) -> denied."""
     if telegram_user_id is None:
         return False
     allowed: set[int] = context.application.bot_data[KEY_ALLOWED]
@@ -119,7 +119,7 @@ def _is_allowed(context: ContextTypes.DEFAULT_TYPE, telegram_user_id: int | None
 
 
 async def _resolve_user_id(context: ContextTypes.DEFAULT_TYPE, telegram_user_id: int) -> int:
-    """Resolves telegram_user_id -> internal user_id, with a cache in bot_data."""
+    """Resolves telegram_user_id -> internal user_id, cached in bot_data."""
     cache: dict[int, int] = context.application.bot_data[KEY_USER_MAP]
     cached = cache.get(telegram_user_id)
     if cached is not None:
@@ -137,7 +137,7 @@ def _truncate(text: str, limit: int = TEXT_PREVIEW_CHARS) -> str:
 
 
 def _first_line(text: str) -> str:
-    """First non-empty line — used in the search-results summary."""
+    """First non-empty line — used in the summary of search results."""
     for line in (text or "").splitlines():
         line = line.strip()
         if line:
@@ -165,7 +165,7 @@ def _registered_keyboard() -> InlineKeyboardMarkup:
 
 
 def _format_card(rec) -> str:
-    """Delivery card, with a header suited to the source (repo / tweet / reddit)."""
+    """Delivery card, with a header tailored to the source (repo / tweet / reddit)."""
     plat = rec["source_platform"]
     meta = rec["metadata"] or {}
     summary = (rec["summary"] or "").strip() or _truncate(rec["raw_text"])
@@ -191,11 +191,11 @@ async def deliver_pending(app: Application, tune: bool = False) -> int:
     """Delivers a digest in 2 buckets (📦 repos / 🗞️ news) per user.
 
     Each bucket is ranked by affinity WITHIN the bucket itself — your votes
-    on repos don't affect the news and vice versa — with a cap per digest. It
-    doesn't deliver anything published more than DELIVERY_MAX_AGE_DAYS days ago.
+    on repos don't affect news and vice versa — with a cap per digest. It never
+    delivers anything published more than DELIVERY_MAX_AGE_DAYS days ago.
 
-    `tune=True` (daily job) lets auto-balancing learn from the votes before
-    delivering; in `/feed` it's False (doesn't reshuffle the mix on each request).
+    `tune=True` (daily job) lets auto-balancing learn from votes before
+    delivering; in `/feed` it stays False (doesn't shuffle the mix on every request).
     Returns the total number of cards sent.
     """
     db: Database = app.bot_data[KEY_DB]
@@ -218,7 +218,7 @@ async def deliver_pending(app: Application, tune: bool = False) -> int:
             continue
 
         for bucket_key, header, platforms, cap in BUCKETS:
-            if tune:  # learns the new×relevant mix for this bucket (once/day)
+            if tune:  # learns this bucket's new×relevant mix (once a day)
                 await _auto_tune_balance(db, user_id, bucket_key, list(platforms))
             recs = [r for r in pending if r["source_platform"] in platforms]
             if recs:
@@ -235,12 +235,12 @@ async def _auto_tune_balance(
 ) -> None:
     """Learns the bucket's novelty fraction from YOUR votes.
 
-    Cards with a LOW affinity score got in through the FRESHNESS slot; if you
-    like those, you enjoy discovery -> raise novelty; if you reject them, lower it.
-    Small step (EMA), so a manual adjustment via chat still dominates for several
-    days. Only acts with enough signal (>= AUTO_BALANCE_MIN_VOTES votes in the
-    bucket) and when there is score separation (otherwise you can't tell novelty
-    from relevance apart).
+    Cards with LOW affinity score got in via the FRESHNESS slot; if you
+    like those, you enjoy discovering -> raise novelty; if you reject them, lower it.
+    Small step (EMA), so a manual adjustment via chat still dominates for several days.
+    Only acts with enough signal (>= AUTO_BALANCE_MIN_VOTES votes in the bucket) and
+    when there's score separation (otherwise you can't tell novelty from
+    relevance apart).
     """
     try:
         rows = await db.balance_signal(user_id, platforms)
@@ -256,7 +256,7 @@ async def _auto_tune_balance(
         return
     like_low = sum(1 for r in low if r["vote"] == 1) / len(low)
     like_high = sum(1 for r in high if r["vote"] == 1) / len(high)
-    pref = like_low - like_high                 # [-1,1]: + = enjoys novelty
+    pref = like_low - like_high                 # [-1,1]: + = likes novelty
     lo, hi = AUTO_BALANCE_BOUNDS
     target = max(lo, min(hi, 0.35 + 0.20 * pref))
     default_frac = FRESH_SLOTS.get(bucket_key, 0) / max(1, _BUCKET_CAP.get(bucket_key, 1))
@@ -274,16 +274,16 @@ async def _auto_tune_balance(
 
 
 def _pub_ts(rec) -> float:
-    """Publication timestamp to sort by freshness (0 when absent)."""
+    """Publication timestamp for ordering by freshness (0 when absent)."""
     pa = rec["published_at"]
     return pa.timestamp() if pa is not None else 0.0
 
 
 def _focus_boost(emb, focuses) -> float:
-    """How much the active steering (/focus) pulls this post up (0 = nothing).
+    """How much the active direction (/focus) pulls this post up (0 = nothing).
 
     Vectors are L2-normalized -> cosine similarity = inner product.
-    Works EVEN without votes: the steering re-ranks the feed on the spot.
+    Works EVEN without votes: the direction re-ranks the feed on the spot.
     """
     boost = 0.0
     for f in focuses:
@@ -301,10 +301,10 @@ async def _deliver_bucket(
 ) -> int:
     """Ranks and delivers ONE bucket.
 
-    Two signals add up to each card's score:
+    Two signals add up in each card's score:
       - affinity: your 👍/👎 WITHIN this bucket (restricted to `platforms`);
-      - steering (/focus): this bucket's active topic re-ranks toward it.
-    Affinity here only RANKS (👍 up, 👎 down); nothing is hidden.
+      - direction (/focus): this bucket's active topic re-ranks toward it.
+    Affinity here only RANKS (👍 rises, 👎 sinks); nothing is hidden.
     """
     likes, dislikes = await db.vote_counts(user_id, platforms=platforms)
     affinity_on = (likes + dislikes) >= MIN_VOTES_FOR_AFFINITY
@@ -327,7 +327,7 @@ async def _deliver_bucket(
                 score += sum(
                     n["vote"] * max(0.0, 1.0 - float(n["dist"])) for n in neighbors
                 )
-            # --- active steering (/focus) ---
+            # --- active direction (/focus) ---
             if focuses:
                 score += _focus_boost(emb, focuses)
         scored.append((rec, score))
@@ -336,9 +336,9 @@ async def _deliver_bucket(
     score_by_id = {rec["id"]: score for rec, score in scored}
 
     # Splits the bucket's slots: most go to relevance (affinity + focus) and
-    # a reserve goes to the NEWEST not yet chosen. The rest (relevant but not
-    # delivered today) stays a candidate for the next digests.
-    if focuses:  # with FOCUS active: no freshness reserve -> everything by relevance
+    # a reserve goes to the NEWEST not yet chosen. The rest (relevant but
+    # not delivered today) stays a candidate in the next digests.
+    if focuses:  # with FOCO active: no freshness reserve -> everything by relevance
         fresh_quota = 0   # otherwise a new off-topic post jumps the /focus queue
     else:
         frac = await db.get_balance(user_id, bucket_key)
@@ -361,7 +361,7 @@ async def _deliver_bucket(
         chosen.append(rec)
         chosen_ids.add(rec["id"])
 
-    # The header gets a note when there's active steering in this bucket.
+    # The header gets a note when there's an active direction in this bucket.
     if focuses:
         topics = ", ".join(f["topic"] for f in focuses[:3])
         header = f"{header}\n🎯 active focus: {topics}"
@@ -411,8 +411,8 @@ async def _job_deliver(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _job_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
     """JobQueue callback: runs the pipeline (ingest -> embed -> curate) in the bot.
 
-    This way the always-on bot does EVERYTHING — without needing a separate cron
-    service on Railway. Failures of a run are isolated (logged, don't crash the bot).
+    This way the always-on bot does EVERYTHING — no need for a separate cron service
+    on Railway. Failures of a run are isolated (logged, they don't take down the bot).
     """
     app = context.application
     try:
@@ -423,7 +423,7 @@ async def _job_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
             app.bot_data[KEY_SETTINGS],
         )
         await run_curation(app.bot_data[KEY_DB], app.bot_data[KEY_CURATOR])
-        logger.info("Pipeline job: cycle complete.")
+        logger.info("Pipeline job: cycle completed.")
     except Exception:  # pragma: no cover
         logger.exception("Pipeline job failed.")
 
@@ -440,11 +440,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Hi! Once a day I'll send you two buckets of AI news:\n"
         "📦 TRENDING REPOS (GitHub) and 🗞️ WHAT PEOPLE ARE TALKING ABOUT (X + Reddit).\n\n"
         "Commands:\n"
-        "• /feed — fetch whatever's new right now\n"
+        "• /feed — fetch whatever is new right now\n"
         "• /run — run a cycle now (ingest + curate + deliver)\n"
         "• /search <query> — semantic search over your archive (❤️ = liked)\n"
-        "• /focus — view/clear the current feed steering\n"
-        "• just talk to me — steer me (“for 3 days I want repos about RAG”) "
+        "• /focus — view/clear the feed's current direction\n"
+        "• /mix — view the current new×relevant balance\n"
+        "• just talk to me — steer (“for 3 days I want repos about RAG”) "
         "or ask (“what was that news about agents that I liked?”)\n"
         "• paste a link — I'll read the page and save it to your archive\n\n"
         "Use 👍/👎 on the cards: each bucket learns your taste separately."
@@ -452,7 +453,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Triggers deliver_pending on demand (delivers to ALL authorized users)."""
+    """Fires deliver_pending on demand (delivers to ALL authorized users)."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -489,13 +490,13 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         bd["pipeline_running"] = False
     tail = "See above 👆" if n_sent else "Nothing new approved to deliver right now."
     await update.effective_message.reply_text(
-        f"✅ Cycle complete: {n_new} ingested, {n_cur} curated, "
+        f"✅ Cycle completed: {n_new} ingested, {n_cur} curated, "
         f"{n_sent} delivered. {tail}"
     )
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/search <query>: embeds the question + searches the curated archive (❤️=liked)."""
+    """/search <query>: embed the question + search the curated archive (❤️=liked)."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -510,18 +511,18 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = await _resolve_user_id(context, user.id)
     try:
         # The archive is embedded in English -> translate the query before searching.
-        # (Recall via chat already arrives in English, from the Steerer parser.)
+        # (Chat recall already arrives in English, from the Steerer's parser.)
         q_en = await context.application.bot_data[KEY_STEERER].translate_to_en(query_text)
         vec = await _embedder(context).embed_query(q_en)
         matches = await _db(context).search_pool(user_id, vec, limit=SEARCH_LIMIT)
     except Exception:  # pragma: no cover
         logger.exception("Search failed for tg=%s", user.id)
-        await update.effective_message.reply_text("Search went wrong. Try again?")
+        await update.effective_message.reply_text("The search went wrong. Try again?")
         return
 
     if not matches:
         await update.effective_message.reply_text(
-            "Couldn't find anything in your curated archive for that query."
+            "I didn't find anything in your curated archive for that query."
         )
         return
 
@@ -574,6 +575,34 @@ async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def cmd_mix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/mix — shows each bucket's current new×relevant balance."""
+    user = update.effective_user
+    if not _is_allowed(context, user.id if user else None):
+        return
+    user_id = await _resolve_user_id(context, user.id)
+    db = _db(context)
+    label = {"repos": "📦 repos", "news": "🗞️ news"}
+    lines = ["⚖️ Current mix (novelty / relevance):"]
+    for bucket_key in ("repos", "news"):
+        frac = await db.get_balance(user_id, bucket_key)
+        if frac is None:  # no saved adjustment -> bucket's default reserve
+            f = FRESH_SLOTS.get(bucket_key, 0) / max(1, _BUCKET_CAP.get(bucket_key, 1))
+            tag = "default"
+        else:
+            f = float(frac)
+            tag = "adjusted"
+        pct = round(f * 100)
+        lines.append(
+            f"• {label[bucket_key]}: ~{pct}% novelty / {100 - pct}% relevance ({tag})"
+        )
+    lines.append(
+        "\nThe bot auto-adjusts from your votes (starting at ~6 votes in the bucket). "
+        "To change it by hand: just say it (e.g. “more novelty in the news”). To reset: “undo that”."
+    )
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 # --------------------------------------------------------------------------
 # Save a pasted link (ACTIVE curation — without relying on 👍/👎)
 # --------------------------------------------------------------------------
@@ -596,8 +625,8 @@ async def _fetch_readable(url: str) -> tuple[str, str | None]:
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Text WITHOUT a command -> routes: a link is saved to the archive; otherwise,
-    interpreted as 'feed steering' (/focus in natural language)."""
+    """Text WITHOUT a command -> routes: a link is saved to the archive; otherwise it's
+    interpreted as 'feed direction' (/focus in natural language)."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -622,7 +651,7 @@ _CHAT_HINT = (
 async def _handle_chat(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
 ) -> None:
-    """Routes a text msg: feed steering / vote recall / hint."""
+    """Routes a text message: feed direction / vote recall / hint."""
     parser: Steerer = context.application.bot_data[KEY_STEERER]
     intent = await parser.parse(text)
     if intent is None:
@@ -632,7 +661,10 @@ async def _handle_chat(
         await _do_recall(update, context, intent.recall_query, intent.recall_polarity)
         return
     if intent.kind == "balance":
-        await _apply_balance(update, context, intent.balance_bucket, intent.balance_fresh)
+        await _apply_balance(
+            update, context, intent.balance_bucket,
+            intent.balance_fresh, intent.balance_reset,
+        )
         return
     if intent.kind == "steer" and intent.directives:
         await _apply_focus(update, context, intent.directives)
@@ -643,7 +675,7 @@ async def _handle_chat(
 async def _apply_focus(
     update: Update, context: ContextTypes.DEFAULT_TYPE, directives
 ) -> None:
-    """Embeds each topic and writes to `focus` (replaces the bucket's previous steering)."""
+    """Embeds each topic and writes to `focus` (replaces the bucket's previous direction)."""
     user_id = await _resolve_user_id(context, update.effective_user.id)
     embedder = _embedder(context)
     db = _db(context)
@@ -656,7 +688,7 @@ async def _apply_focus(
         except Exception:  # pragma: no cover
             logger.exception("steering: failed to apply focus %s/%s", d.bucket, d.topic)
     if not applied:
-        await update.effective_message.reply_text("I tried to adjust the focus but it errored. 😬")
+        await update.effective_message.reply_text("I tried to adjust the focus but it errored out. 😬")
         return
 
     label = {"repos": "📦 repos", "news": "🗞️ news"}
@@ -665,27 +697,35 @@ async def _apply_focus(
         lines.append(f"• {label.get(d.bucket, d.bucket)} → {d.topic}  ({d.days} day(s))")
     lines.append("")
     lines.append(
-        "I'll prioritize this in delivery and start fetching more of this topic.\n"
+        "I'll prioritize this in delivery and start fetching more on this topic.\n"
         "/focus shows what's active · /focus clear clears it."
     )
     await update.effective_message.reply_text("\n".join(lines))
 
 
 async def _apply_balance(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, bucket: str, fresh: float
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    bucket: str, fresh: float, reset: bool = False,
 ) -> None:
-    """Adjusts the NEW vs RELEVANT mix of one (or both) bucket(s)."""
+    """Adjusts (or RESETS) the NEW vs RELEVANT mix of one (or both) bucket(s)."""
     user_id = await _resolve_user_id(context, update.effective_user.id)
     db = _db(context)
-    fresh = max(0.0, min(1.0, float(fresh)))
     buckets = ("repos", "news") if bucket == "both" else (bucket,)
+    label = {"repos": "📦 repos", "news": "🗞️ news"}
+    alvo = " and ".join(label.get(b, b) for b in buckets)
+    if reset:  # "undo that"/"reset": clears the saved adjustment -> default
+        for b in buckets:
+            await db.clear_balance(user_id, b)
+        await update.effective_message.reply_text(
+            f"⚖️ Mix for {alvo} back to default."
+        )
+        return
+    fresh = max(0.0, min(1.0, float(fresh)))
     for b in buckets:
         await db.set_balance(user_id, b, fresh)
     pct = round(fresh * 100)
-    label = {"repos": "📦 repos", "news": "🗞️ news"}
-    target = " and ".join(label.get(b, b) for b in buckets)
     await update.effective_message.reply_text(
-        f"⚖️ Mix adjusted for {target}: ~{pct}% novelty / {100 - pct}% relevance.\n"
+        f"⚖️ Mix adjusted for {alvo}: ~{pct}% novelty / {100 - pct}% relevance.\n"
         "Change it whenever you want, just say so."
     )
 
@@ -693,39 +733,50 @@ async def _apply_balance(
 async def _do_recall(
     update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, polarity: str
 ) -> None:
-    """Recalls what YOU voted on (👍/👎) about a topic, by similarity."""
+    """A generic question ('any') searches the WHOLE archive; 'liked'/'disliked'
+    recalls only what you voted on. (The query already comes in English from the parser.)"""
     user_id = await _resolve_user_id(context, update.effective_user.id)
-    vote = {"liked": 1, "disliked": -1}.get(polarity)  # None = any vote
+    db = _db(context)
     try:
         vec = await _embedder(context).embed_query(query)
-        rows = await _db(context).recall_voted(user_id, vec, vote=vote, limit=SEARCH_LIMIT)
+        if polarity in ("liked", "disliked"):
+            vote = 1 if polarity == "liked" else -1
+            rows = await db.recall_voted(user_id, vec, vote=vote, limit=SEARCH_LIMIT)
+            mode = "voted"
+        else:  # 'any' -> the whole curated archive (not just your votes)
+            rows = await db.search_pool(user_id, vec, limit=SEARCH_LIMIT)
+            mode = "archive"
     except Exception:  # pragma: no cover
         logger.exception("recall failed for tg=%s", update.effective_user.id)
-        await update.effective_message.reply_text("Search went wrong. Try again?")
+        await update.effective_message.reply_text("The search went wrong. Try again?")
         return
 
     if not rows:
-        scope = {
-            "liked": "you liked",
-            "disliked": "you disliked",
-        }.get(polarity, "you voted on")
-        await update.effective_message.reply_text(
-            f"Couldn't find anything {scope} about “{query}”. "
-            "(Maybe you haven't voted on it yet.)"
-        )
+        if mode == "voted":
+            scope = "you liked" if polarity == "liked" else "you disliked"
+            msg = f"I didn't find anything {scope} about “{query}”."
+        else:
+            msg = f"I didn't find anything in your archive about “{query}”."
+        await update.effective_message.reply_text(msg)
         return
 
-    title = {
-        "liked": "❤️ You liked",
-        "disliked": "👎 You disliked",
-    }.get(polarity, "🗳️ You voted")
-    lines = [f"{title} — about “{query}”:", ""]
-    for i, r in enumerate(rows, start=1):
-        mark = "❤️" if r["vote"] == 1 else "👎"
-        head = _first_line(r["raw_text"])[:120]
-        lines.append(f"{i}. {mark} {head}")
-        if r["source_url"]:
-            lines.append(f"   {r['source_url']}")
+    if mode == "voted":
+        title = "❤️ You liked" if polarity == "liked" else "👎 You disliked"
+        lines = [f"{title} — about “{query}”:", ""]
+        for i, r in enumerate(rows, start=1):
+            mark = "❤️" if r["vote"] == 1 else "👎"
+            head = _first_line(r["raw_text"])[:120]
+            lines.append(f"{i}. {mark} {head}")
+            if r["source_url"]:
+                lines.append(f"   {r['source_url']}")
+    else:  # archive (whole archive; ❤️ marks what you liked)
+        lines = [f"🔎 In your archive — about “{query}” (❤️ = you liked):", ""]
+        for i, r in enumerate(rows, start=1):
+            mark = " ❤️" if r["liked"] else ""
+            head = _first_line(r["raw_text"])[:120]
+            lines.append(f"{i}.{mark} {head}")
+            if r["source_url"]:
+                lines.append(f"   {r['source_url']}")
     await update.effective_message.reply_text(
         "\n".join(lines),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -735,10 +786,10 @@ async def _do_recall(
 async def _save_link(
     update: Update, context: ContextTypes.DEFAULT_TYPE, url: str
 ) -> None:
-    """Reads a URL via Jina, embeds it and saves it as a 'manual' post + 👍.
+    """Reads a URL via Jina, embeds it and stores it as a 'manual' post + 👍.
 
-    Active curation: you save something without waiting for a card. The item enters
-    the archive (origin='manual', vote +1) and starts showing up in /search.
+    Active curation: you save something without waiting for a card. The item enters the
+    archive (origin='manual', vote +1) and starts showing up in /search.
     """
     user_id = await _resolve_user_id(context, update.effective_user.id)
     await update.effective_message.reply_text("🔗 Reading and saving the link…")
@@ -774,7 +825,7 @@ async def _save_link(
         await db.record_vote(user_id, post_id, vote=1, origin="manual")
     except Exception:  # pragma: no cover
         logger.exception("Failed to save link %s", url)
-        await update.effective_message.reply_text("I tried to save it but it errored. 😬")
+        await update.effective_message.reply_text("I tried to save it but it errored out. 😬")
         return
 
     await update.effective_message.reply_text(
@@ -793,13 +844,13 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     from_user = query.from_user
     if not _is_allowed(context, from_user.id if from_user else None):
-        # Answer the callback so the spinner doesn't keep spinning, but ignore the action.
+        # Answer the callback so the spinner doesn't keep turning, but ignore the action.
         await query.answer("Not authorized.", show_alert=False)
         return
 
     data = query.data or ""
 
-    # 'noop': click on an already-recorded button. Just confirm and exit.
+    # 'noop': click on the already-recorded button. Just confirm and exit.
     if data == "noop":
         await query.answer("Already recorded ✅")
         return
@@ -813,7 +864,7 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Invalid action.", show_alert=False)
         return
 
-    await query.answer()  # stops the button spinner immediately
+    await query.answer()  # dismisses the button spinner immediately
 
     user_id = await _resolve_user_id(context, from_user.id)
     message_id = query.message.message_id if query.message else None
@@ -825,16 +876,16 @@ async def on_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         telegram_message_id=message_id,
     )
 
-    # Replace the 👍/👎 with a single inert button, confirming the recording.
+    # Replaces the 👍/👎 with a single inert button, confirming the record.
     try:
         await query.edit_message_reply_markup(reply_markup=_registered_keyboard())
     except BadRequest:
-        # Old/identical/inaccessible message — the vote was already recorded, ok to ignore.
-        logger.debug("Could not edit the keyboard for post_id=%s", post_id)
+        # Old/identical/inaccessible message — vote was already recorded, fine to ignore.
+        logger.debug("Couldn't edit the keyboard for post_id=%s", post_id)
 
 
 # --------------------------------------------------------------------------
-# Application build / bootstrap
+# Application construction / bootstrap
 # --------------------------------------------------------------------------
 async def _post_init(app: Application) -> None:
     """Runs after the loop starts: registers each allowlist user in the DB."""
@@ -861,13 +912,13 @@ def build_application(
     *,
     connect_db: bool = True,
 ) -> Application:
-    """Builds the Application with handlers, delivery job and shared state.
+    """Assembles the Application with handlers, delivery job and shared state.
 
-    The allowlist is derived from sources.yaml; each user's registration in the DB
+    The allowlist is derived from sources.yaml; registering each user in the DB
     happens in post_init (already inside the loop managed by run_polling).
 
     connect_db=True (default): post_init connects the pool and post_shutdown
-    closes it — so main() doesn't have to manage the loop manually. Pass False if
+    closes it — this way main() doesn't need to manage the loop manually. Pass False if
     the caller already controls connect()/close() externally.
     """
     sources = load_sources()
@@ -905,8 +956,9 @@ def build_application(
     app.add_handler(CommandHandler("run", cmd_run))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("focus", cmd_focus))
+    app.add_handler(CommandHandler("mix", cmd_mix))
     app.add_handler(CallbackQueryHandler(on_vote))  # covers up:/down:/noop
-    # Text without a command: link -> saves to the archive; otherwise -> feed steering (/focus).
+    # Text without a command: link -> save to archive; otherwise -> feed direction (/focus).
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     # Periodic delivery via JobQueue (requires python-telegram-bot[job-queue]).
@@ -936,10 +988,10 @@ def build_application(
 
 
 def main() -> None:
-    """Builds the Application and runs long-polling.
+    """Assembles the Application and runs long-polling.
 
-    run_polling manages the asyncio loop lifecycle internally; the
-    DB connect()/close() is done in the post_init/post_shutdown hooks
+    run_polling manages the asyncio loop's lifecycle internally; the DB's
+    connect()/close() is done in the post_init/post_shutdown hooks
     configured in build_application(connect_db=True).
     """
     logging.basicConfig(

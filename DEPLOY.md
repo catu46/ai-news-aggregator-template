@@ -1,15 +1,15 @@
 # Deploying on Railway
 
 Architecture: **a single always-on service**. The bot runs the Telegram
-long-polling **and**, via an internal `JobQueue`, the pipeline (ingest → embed → curate)
-and the digest delivery. **No separate cron service needed.**
+long-polling **and**, via an internal `JobQueue`, the pipeline (ingest → embed → curate) and the
+digest delivery. **No separate cron service needed.**
 
 | Service | Type | Start command | What it runs |
 |---|---|---|---|
-| **bot** | Always-on | `python -m src.bot.bot` | 24/7: Telegram polling + 2 internal jobs — **pipeline every 30 min** and **digest delivery once/day** (`/feed` forces it anytime) |
+| **bot** | Always-on | `python -m src.bot.bot` | 24/7: Telegram polling + 2 internal jobs — **pipeline every 30 min** and **digest delivery 1x/day** (`/feed` forces it any time) |
 
 > The **seed** (cold-start) is an **optional one-off**, not a service: run it once
-> (locally is usually simplest) and you're done.
+> (local is usually simpler) and you're done.
 
 ---
 
@@ -21,12 +21,12 @@ and the digest delivery. **No separate cron service needed.**
 
 ## 2. Connect the repository
 
-1. Railway → **New Project** → **Deploy from GitHub repo** → choose this repo.
+1. Railway → **New Project** → **Deploy from GitHub repo** → pick this repo.
 2. This creates **one** service. The build uses `Procfile`/`railway.json` (Nixpacks
    builder, Python 3.12) with `startCommand: python -m src.bot.bot` and
    `restartPolicyType: ALWAYS`.
 
-> ⚠️ Create **only one** service. If Railway suggests a second one (e.g., because of a
+> ⚠️ Create **only one** service. If Railway suggests a second one (e.g., from a
 > comment in the Procfile), remove it — the pipeline already runs inside the bot.
 
 ## 3. Environment variables (Service → Variables)
@@ -36,14 +36,14 @@ and the digest delivery. **No separate cron service needed.**
 | `ANTHROPIC_API_KEY` | yes | Haiku 4.5 curator + steerer |
 | `VOYAGE_API_KEY` | yes | `voyage-4-lite` embeddings |
 | `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |
-| `DATABASE_URL` | yes | **POOLED** connection string from Supabase |
+| `DATABASE_URL` | yes | Supabase **POOLED** connection string |
 | `TELEGRAM_USER_ID` | optional | your numeric id (used by the MCP server; otherwise falls back to the 1st in `sources.yaml`) |
 | `TWITTER_AUTH_TOKEN` | yes* | `auth_token` cookie from a throwaway X account |
 | `TWITTER_CT0` | yes* | `ct0` cookie from the same session |
 | `REDDIT_USER_AGENT` | optional | descriptive UA (has a default in `.env.example`) |
 | `GITHUB_TOKEN` | optional | raises the Search API rate limit |
 | `EXA_API_KEY` | optional | boosts the seed's semantic search |
-| `CURATOR_MONTHLY_BUDGET_USD` | optional | spending cap (default `8`); curation pauses when exceeded |
+| `CURATOR_MONTHLY_BUDGET_USD` | optional | spend cap (default `8`); curation pauses when exceeded |
 | `CURATOR_MODEL` | optional | default `claude-haiku-4-5` |
 | `EMBEDDING_MODEL` | optional | default `voyage-4-lite` |
 
@@ -51,26 +51,26 @@ and the digest delivery. **No separate cron service needed.**
 
 > The X cookies **expire**. When X ingestion breaks, re-extract
 > `auth_token`/`ct0` from a logged-in session and update the vars — the next
-> JobQueue cycle (≤ 30 min) will pick it up, no redeploy needed.
+> JobQueue cycle (≤ 30 min) picks it up, no redeploy needed.
 
 ## 4. Config in git (`config/sources.yaml`)
 
-Railway builds **from git**, so `config/sources.yaml` needs to be
+Railway builds **from git**, so `config/sources.yaml` must be
 **committed in your private repo** for the bot to find the allowlist and the sources in
-production (a normal commit; or `git add -f` if you gitignored the configs). It's **personal
-data**, not a secret — that's why the deploy repo should be **private**. (The
-secrets stay only in the environment variables, never in git.)
+production (a normal commit; or `git add -f` if you gitignored the configs). It's
+**personal data**, not a secret — that's why the deploy repo should be **private**. (The
+secrets stay only in environment variables, never in git.)
 
-## 5. Cold-start (seed) — optional, once
+## 5. Cold-start (seed) — optional, 1x
 
-Loads `config/seeds.yaml` as preloaded votes, so that `/search`/recall already
+Loads `config/seeds.yaml` as preloaded votes, so `/search`/recall already
 work on day 1. It's usually simpler to run it **locally**:
 
 ```bash
 python -m src.seed
 ```
 
-It needs `DATABASE_URL` + `VOYAGE_API_KEY` and the schema applied. It's idempotent
+Needs `DATABASE_URL` + `VOYAGE_API_KEY` and the schema applied. It's idempotent
 (re-running doesn't duplicate). On Railway you can do it as a one-off **"Run"** with
 `python -m src.seed`; it doesn't become a service.
 
@@ -81,11 +81,11 @@ It needs `DATABASE_URL` + `VOYAGE_API_KEY` and the schema applied. It's idempote
 If a future version requires system packages, declare them in `railway.json` under
 `build.nixpacksPlan.phases.setup.aptPkgs` (we already include `git`).
 
-## 7. Validate (via logs)
+## 7. Validate (from the logs)
 
-- **bot:** the logs show the Telegram polling active (`getUpdates ... 200`); send
+- **bot:** logs show the Telegram polling active (`getUpdates ... 200`); send
   `/start` to the bot.
 - **pipeline (internal):** ~30 s after startup, the `pipeline` job appears collecting
   (Reddit/GitHub/X) → embeddings → curation; it repeats **every 30 min**.
-- **delivery:** the digest job runs **once/day**; use `/feed` to force it now.
+- **delivery:** the digest job runs **1x/day**; use `/feed` to force it now.
 - **database:** new posts showing up and, after 👍/👎 votes, `vote_counts` changing.

@@ -4,7 +4,7 @@
 # create a new block with their telegram_user_id.
 #
 # Find your telegram_user_id: send /start to the bot (it logs the id) or
-# talk to @userinfobot on Telegram.
+# message @userinfobot on Telegram.
 #
 # HOW TO USE: copy this file to `config/sources.yaml` and fill it with
 # your own values. This .example only has placeholders.
@@ -46,7 +46,7 @@ users:
   # --- Example of a 2nd person (uncomment to enable) ---
   # friend1:
   #   telegram_user_id: 111111111
-  #   display_name: "John Doe"
+  #   display_name: "Jane Doe"
   #   reddit:
   #     subreddits: [LocalLLaMA, rust]
   #   x:

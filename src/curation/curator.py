@@ -2,9 +2,9 @@
 
 Architecture
 ------------
-- `Curator` (ABC): the stable interface. Every impl follows
+- `Curator` (ABC): the stable interface. Any impl follows
   `async def classify(post_text, similarity_signal=None) -> Verdict | None`.
-- `AnthropicCurator`: default impl using Haiku 4.5 via Structured Outputs
+- `AnthropicCurator`: the default impl using Haiku 4.5 via Structured Outputs
   (`client.messages.parse(..., output_format=Verdict)`), with the large rubric
   in a CACHED system block (cache_control ephemeral).
 - `BudgetExceeded`: raised by `classify()` when the estimated monthly spend
@@ -31,10 +31,10 @@ from .prompt import RUBRIC, build_user_message
 
 logger = logging.getLogger("curator")
 
-# Haiku 4.5 price (USD per 1M tokens), verified Jun/2026.
+# Haiku 4.5 pricing (USD per 1M tokens), verified Jun/2026.
 # Tokens read from cache cost ~0.1x of input; here we use a conservative
 # estimate (we charge cache_read at the same price as input). Overestimating
-# the spend is safe: in the worst case we stop a bit short of the real budget.
+# the spend is safe: worst case we stop a little before the real budget.
 _PRICE_INPUT_PER_TOKEN = 1.0 / 1_000_000   # $1 / 1M input
 _PRICE_OUTPUT_PER_TOKEN = 5.0 / 1_000_000  # $5 / 1M output
 
@@ -110,7 +110,7 @@ class SpendGuard:
 
 
 def estimate_cost_usd(usage: object) -> float:
-    """Approximate USD for a response, from `resp.usage`.
+    """Approximate USD of a response, from `resp.usage`.
 
     We charge input + cache_read at the input price (conservative estimate)
     and output at the output price. `usage` is the SDK object (attributes may
@@ -139,7 +139,7 @@ class Curator(ABC):
         """Classifies `post_text`. None on refusal/max_tokens/empty parse.
 
         May raise `BudgetExceeded` if the spend guard is over budget.
-        The caller marks an error (mark_curation_error) when it gets None.
+        The caller marks an error (mark_curation_error) when it receives None.
         """
         raise NotImplementedError
 
@@ -167,7 +167,7 @@ class AnthropicCurator(Curator):
         )
 
         # STATIC and CACHED system block. The rubric is large on purpose
-        # (>= 4096 tokens, Haiku's floor) so that prompt caching kicks in: the
+        # (>= 4096 tokens, Haiku's floor) so prompt caching kicks in: the
         # prefix is byte-for-byte identical on every call.
         self._system = [
             {
@@ -192,7 +192,7 @@ class AnthropicCurator(Curator):
         self, post_text: str, similarity_signal: str | None = None,
         interests: list[str] | None = None,
     ) -> Verdict | None:
-        # Budget gate BEFORE spending: cheap and avoids blowing past it.
+        # Budget gate BEFORE spending: cheap and prevents blowing past it.
         if self.is_over_budget():
             raise BudgetExceeded(
                 SpendGuard._month_key(), self.spent_this_month, self._budget_usd
@@ -216,10 +216,10 @@ class AnthropicCurator(Curator):
             output_format=Verdict,
         )
 
-        # ALWAYS account for the spend (even on failure — tokens were already charged).
+        # ALWAYS account for the spend (even on failure — tokens were already billed).
         try:
             self._spend.add(estimate_cost_usd(resp.usage))
-        except Exception:  # noqa: BLE001 — accounting never brings down the curation
+        except Exception:  # noqa: BLE001 — accounting never takes down curation
             pass
 
         # Failures treated as None: the caller marks an error and moves on.
@@ -230,7 +230,7 @@ class AnthropicCurator(Curator):
         if verdict is None:
             return None
 
-        # Hygiene: clamp the confidence range (the schema doesn't enforce ge/le).
+        # Hygiene: enforce the confidence range (the schema doesn't impose ge/le).
         if not (0.0 <= verdict.confidence <= 1.0):
             verdict.confidence = max(0.0, min(1.0, verdict.confidence))
         return verdict
@@ -241,9 +241,9 @@ class AnthropicCurator(Curator):
 # --------------------------------------------------------------------------
 # DeepSeek could be a second impl of `Curator`. Its API is compatible with the
 # OpenAI style; with `response_format`/function-calling for the JSON, you could
-# map the output into the same `Verdict` and return it here. The rest of the
-# pipeline (runner, db.mark_curation) doesn't change — only the injected
-# `Curator` is different. Sketch:
+# map the output into the same `Verdict` and return it here.
+# The rest of the pipeline (runner, db.mark_curation) doesn't change — only the
+# injected `Curator` differs. Sketch:
 #
 #   class DeepSeekCurator(Curator):
 #       def __init__(self, settings, *, spend_guard=None, ...):
@@ -266,7 +266,7 @@ class AnthropicCurator(Curator):
 #               response_format={"type": "json_object"},
 #               max_tokens=300,
 #           )
-#           # ...accumulate spend via DeepSeek's price table...
+#           # ...accumulate spend using DeepSeek's pricing table...
 #           # ...parse the JSON and validate with Verdict.model_validate_json(...)...
 #           # ...return Verdict or None on failure.
 #
@@ -297,18 +297,17 @@ EXACTLY these keys:
 }
 """
 
-# Kimi k2.6 prices (USD per 1M tokens), reported by the provider (Moonshot).
+# Kimi k2.6 pricing (USD per 1M tokens), reported by the provider (Moonshot).
 _KIMI_INPUT_HIT = 0.16 / 1_000_000   # input on cache hit
 _KIMI_INPUT_MISS = 0.95 / 1_000_000  # input on cache miss
 _KIMI_OUTPUT = 4.00 / 1_000_000
 
 
 def estimate_kimi_cost_usd(usage: object) -> float:
-    """Approximate USD for a Kimi response, from the OpenAI-style `usage`.
+    """Approximate USD of a Kimi response, from the OpenAI-style `usage`.
 
-    Uses `prompt_tokens_details.cached_tokens` when available (charges the
-    cheaper cache hit); otherwise, charges all input at the cache miss price
-    (conservative).
+    Uses `prompt_tokens_details.cached_tokens` when available (charges cache hit
+    cheaper); otherwise, charges all input at the cache miss price (conservative).
     """
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -325,8 +324,8 @@ class KimiCurator(Curator):
 
     Selectable via `CURATOR_PROVIDER=kimi`. Reuses the `RUBRIC`, the
     `SpendGuard` and the `BudgetExceeded` — the rest of the pipeline doesn't
-    change. Since Kimi doesn't have `messages.parse`, we use JSON mode +
-    Pydantic validation (`Verdict`).
+    change. Since Kimi has no `messages.parse`, we use JSON mode + Pydantic
+    validation (`Verdict`).
     """
 
     def __init__(
@@ -352,7 +351,7 @@ class KimiCurator(Curator):
             api_key=settings.moonshot_api_key,
             base_url=settings.moonshot_base_url,
         )
-        # Static system prefix (RUBRIC + JSON contract) -> Kimi's cache.
+        # Static system prefix (RUBRIC + JSON contract) -> Kimi cache.
         self._system = RUBRIC + _KIMI_JSON_CONTRACT
 
     @property
@@ -388,14 +387,14 @@ class KimiCurator(Curator):
                     {"role": "user", "content": user_message},
                 ],
             )
-        except Exception:  # noqa: BLE001 — API/network error -> None (caller marks error)
+        except Exception:  # noqa: BLE001 — API/network error -> None (caller marks an error)
             logger.exception("kimi: classification call failed")
             return None
 
-        # ALWAYS account for the spend (tokens were already charged).
+        # ALWAYS account for the spend (tokens were already billed).
         try:
             self._spend.add(estimate_kimi_cost_usd(resp.usage))
-        except Exception:  # noqa: BLE001 — accounting never brings down the curation
+        except Exception:  # noqa: BLE001 — accounting never takes down curation
             pass
 
         try:
@@ -410,7 +409,7 @@ class KimiCurator(Curator):
 
         try:
             verdict = Verdict.model_validate_json(content)
-        except Exception:  # noqa: BLE001 — invalid JSON / outside the schema
+        except Exception:  # noqa: BLE001 — invalid JSON / off-schema
             logger.warning("kimi: response did not validate against Verdict")
             return None
 

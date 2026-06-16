@@ -1,7 +1,7 @@
 -- =============================================================================
--- RESET — drops everything schema.sql creates. Run it BEFORE reapplying the schema.
+-- RESET — drops everything schema.sql creates. Run BEFORE reapplying the schema.
 -- WARNING: DESTRUCTIVE — deletes ALL data (posts, votes, deliveries, focus).
--- Usage in Supabase: SQL Editor → paste this file → Run; then paste schema.sql → Run.
+-- Usage on Supabase: SQL Editor → paste this file → Run; then paste schema.sql → Run.
 -- =============================================================================
 
 DROP TABLE IF EXISTS focus       CASCADE;
