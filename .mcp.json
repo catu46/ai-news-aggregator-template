@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "acervo": {
+    "archive": {
       "command": ".venv/bin/python",
       "args": ["-m", "src.mcp_server.server"]
     }

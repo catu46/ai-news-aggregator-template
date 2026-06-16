@@ -7,7 +7,7 @@ Responsibilities of this module:
   - Deliver approved, not-yet-delivered posts (deliver_pending), both
     via JobQueue (once/day, in 2 buckets) and on demand via /feed.
   - Record 👍/👎 votes coming from the inline buttons (CallbackQueryHandler).
-  - Semantic search over the posts the user themselves liked (/buscar).
+  - Semantic search over the posts the user themselves liked (/search).
 
 Shared state (Database + Embedder + allowlist) lives in
 application.bot_data, instantiated only once at startup.
@@ -64,7 +64,7 @@ MIN_VOTES_FOR_AFFINITY = 1        # enables ranking starting from the 1st vote
 REPOS_PER_DIGEST = 5
 NEWS_PER_DIGEST = 12
 # (key, header, source platforms, cap per digest). The key matches
-# focus.bucket — it's what links the "steering" (/foco) to the right bucket.
+# focus.bucket — it's what links the "steering" (/focus) to the right bucket.
 BUCKETS = [
     ("repos", "📦 TRENDING REPOS", ("github",), REPOS_PER_DIGEST),
     ("news", "🗞️ WHAT PEOPLE ARE TALKING ABOUT", ("reddit", "twitter"), NEWS_PER_DIGEST),
@@ -280,7 +280,7 @@ def _pub_ts(rec) -> float:
 
 
 def _focus_boost(emb, focuses) -> float:
-    """How much the active steering (/foco) pulls this post up (0 = nothing).
+    """How much the active steering (/focus) pulls this post up (0 = nothing).
 
     Vectors are L2-normalized -> cosine similarity = inner product.
     Works EVEN without votes: the steering re-ranks the feed on the spot.
@@ -303,7 +303,7 @@ async def _deliver_bucket(
 
     Two signals add up to each card's score:
       - affinity: your 👍/👎 WITHIN this bucket (restricted to `platforms`);
-      - steering (/foco): this bucket's active topic re-ranks toward it.
+      - steering (/focus): this bucket's active topic re-ranks toward it.
     Affinity here only RANKS (👍 up, 👎 down); nothing is hidden.
     """
     likes, dislikes = await db.vote_counts(user_id, platforms=platforms)
@@ -327,7 +327,7 @@ async def _deliver_bucket(
                 score += sum(
                     n["vote"] * max(0.0, 1.0 - float(n["dist"])) for n in neighbors
                 )
-            # --- active steering (/foco) ---
+            # --- active steering (/focus) ---
             if focuses:
                 score += _focus_boost(emb, focuses)
         scored.append((rec, score))
@@ -339,7 +339,7 @@ async def _deliver_bucket(
     # a reserve goes to the NEWEST not yet chosen. The rest (relevant but not
     # delivered today) stays a candidate for the next digests.
     if focuses:  # with FOCUS active: no freshness reserve -> everything by relevance
-        fresh_quota = 0   # otherwise a new off-topic post jumps the /foco queue
+        fresh_quota = 0   # otherwise a new off-topic post jumps the /focus queue
     else:
         frac = await db.get_balance(user_id, bucket_key)
         if frac is None:  # no saved preference -> bucket's default reserve
@@ -441,9 +441,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📦 TRENDING REPOS (GitHub) and 🗞️ WHAT PEOPLE ARE TALKING ABOUT (X + Reddit).\n\n"
         "Commands:\n"
         "• /feed — fetch whatever's new right now\n"
-        "• /rodar — run a cycle now (ingest + curate + deliver)\n"
-        "• /buscar <query> — semantic search over your archive (❤️ = liked)\n"
-        "• /foco — view/clear the current feed steering\n"
+        "• /run — run a cycle now (ingest + curate + deliver)\n"
+        "• /search <query> — semantic search over your archive (❤️ = liked)\n"
+        "• /focus — view/clear the current feed steering\n"
         "• just talk to me — steer me (“for 3 days I want repos about RAG”) "
         "or ask (“what was that news about agents that I liked?”)\n"
         "• paste a link — I'll read the page and save it to your archive\n\n"
@@ -462,8 +462,8 @@ async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Nothing new for now. 🙂")
 
 
-async def cmd_rodar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/rodar: runs a FULL cycle now (ingest → embed → curate → deliver)."""
+async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/run: runs a FULL cycle now (ingest → embed → curate → deliver)."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -482,7 +482,7 @@ async def cmd_rodar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         n_cur = await run_curation(db, bd[KEY_CURATOR])
         n_sent = await deliver_pending(context.application)
     except Exception:  # pragma: no cover
-        logger.exception("/rodar failed")
+        logger.exception("/run failed")
         await update.effective_message.reply_text("The cycle errored out. 😬 (check the logs)")
         return
     finally:
@@ -494,8 +494,8 @@ async def cmd_rodar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/buscar <query>: embeds the question + searches the curated archive (❤️=liked)."""
+async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/search <query>: embeds the question + searches the curated archive (❤️=liked)."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -503,7 +503,7 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     query_text = " ".join(context.args).strip() if context.args else ""
     if not query_text:
         await update.effective_message.reply_text(
-            "Usage: /buscar <query>\nE.g.: /buscar autonomous agents with tools"
+            "Usage: /search <query>\nE.g.: /search autonomous agents with tools"
         )
         return
 
@@ -539,8 +539,8 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def cmd_foco(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/foco — shows the active focus. /foco limpar — clears it. /foco <text> — steers."""
+async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/focus — shows the active focus. /focus clear — clears it. /focus <text> — steers."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -548,13 +548,13 @@ async def cmd_foco(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = await _resolve_user_id(context, user.id)
     db = _db(context)
 
-    if arg.lower() in ("limpar", "clear", "off", "reset", "zerar"):
+    if arg.lower() in ("clear", "off", "reset"):
         n = await db.clear_focus(user_id)
         await update.effective_message.reply_text(
             f"🎯 Focus cleared ({n} removed)." if n else "There was no active focus."
         )
         return
-    if arg:  # /foco <text> also steers (same path as natural chat)
+    if arg:  # /focus <text> also steers (same path as natural chat)
         await _handle_chat(update, context, arg)
         return
 
@@ -570,7 +570,7 @@ async def cmd_foco(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "No active focus. Tell me something like “for 3 days I want repos about RAG”."
         )
         return
-    lines.append("\n/foco limpar to clear.")
+    lines.append("\n/focus clear to clear it.")
     await update.effective_message.reply_text("\n".join(lines))
 
 
@@ -597,7 +597,7 @@ async def _fetch_readable(url: str) -> tuple[str, str | None]:
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Text WITHOUT a command -> routes: a link is saved to the archive; otherwise,
-    interpreted as 'feed steering' (/foco in natural language)."""
+    interpreted as 'feed steering' (/focus in natural language)."""
     user = update.effective_user
     if not _is_allowed(context, user.id if user else None):
         return
@@ -666,7 +666,7 @@ async def _apply_focus(
     lines.append("")
     lines.append(
         "I'll prioritize this in delivery and start fetching more of this topic.\n"
-        "/foco shows what's active · /foco limpar clears it."
+        "/focus shows what's active · /focus clear clears it."
     )
     await update.effective_message.reply_text("\n".join(lines))
 
@@ -738,7 +738,7 @@ async def _save_link(
     """Reads a URL via Jina, embeds it and saves it as a 'manual' post + 👍.
 
     Active curation: you save something without waiting for a card. The item enters
-    the archive (origin='manual', vote +1) and starts showing up in /buscar.
+    the archive (origin='manual', vote +1) and starts showing up in /search.
     """
     user_id = await _resolve_user_id(context, update.effective_user.id)
     await update.effective_message.reply_text("🔗 Reading and saving the link…")
@@ -778,7 +778,7 @@ async def _save_link(
         return
 
     await update.effective_message.reply_text(
-        f"✅ Saved to your archive: {title or url}\nIt already shows up in /buscar."
+        f"✅ Saved to your archive: {title or url}\nIt already shows up in /search."
     )
 
 
@@ -902,11 +902,11 @@ def build_application(
     # Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("feed", cmd_feed))
-    app.add_handler(CommandHandler("rodar", cmd_rodar))
-    app.add_handler(CommandHandler("buscar", cmd_buscar))
-    app.add_handler(CommandHandler("foco", cmd_foco))
+    app.add_handler(CommandHandler("run", cmd_run))
+    app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("focus", cmd_focus))
     app.add_handler(CallbackQueryHandler(on_vote))  # covers up:/down:/noop
-    # Text without a command: link -> saves to the archive; otherwise -> feed steering (/foco).
+    # Text without a command: link -> saves to the archive; otherwise -> feed steering (/focus).
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     # Periodic delivery via JobQueue (requires python-telegram-bot[job-queue]).

@@ -6,7 +6,7 @@ Claude ("what did I like about RAG?") without opening Telegram.
 
 Run it as a local MCP server (stdio) and plug it into any Claude Code/Desktop:
 
-    claude mcp add acervo -- .venv/bin/python -m src.mcp_server.server
+    claude mcp add archive -- .venv/bin/python -m src.mcp_server.server
 
 Each person runs THEIR OWN instance (their Supabase, their telegram_user_id), so
 the data never mixes — it's the same multi-tenant isolation as the rest of the
@@ -24,7 +24,7 @@ from ..common.config import load_settings, load_sources
 from ..common.db import Database
 from ..common.embeddings import Embedder
 
-mcp = FastMCP("acervo-ia")
+mcp = FastMCP("archive-ia")
 
 # Lazy state: connects on the 1st use of a tool and reuses the pool.
 _db: Database | None = None
@@ -65,16 +65,16 @@ def _headline(raw_text: str | None, width: int = 160) -> str:
 
 
 @mcp.tool()
-async def buscar_acervo(consulta: str, limite: int = 10) -> str:
+async def search_archive(query: str, limit: int = 10) -> str:
     """Semantic search over the curated archive (approved + what you saved/liked).
 
     Use for "is there anything in my archive about X?". ❤️ marks what you liked.
     """
     db, embedder, user_id = await _ensure()
-    vec = await embedder.embed_query(consulta)
-    rows = await db.search_pool(user_id, vec, limit=limite)
+    vec = await embedder.embed_query(query)
+    rows = await db.search_pool(user_id, vec, limit=limit)
     if not rows:
-        return f"Nothing in the archive about “{consulta}”."
+        return f"Nothing in the archive about “{query}”."
     lines = []
     for i, r in enumerate(rows, start=1):
         mark = " ❤️" if r["liked"] else ""
@@ -86,18 +86,18 @@ async def buscar_acervo(consulta: str, limite: int = 10) -> str:
 
 
 @mcp.tool()
-async def lembrar_votos(consulta: str, voto: str = "any", limite: int = 10) -> str:
+async def recall_votes(query: str, vote: str = "any", limit: int = 10) -> str:
     """Recalls what YOU voted on about a topic, by similarity.
 
-    voto: "liked" (👍 only), "disliked" (👎 only) or "any" (any vote).
+    vote: "liked" (👍 only), "disliked" (👎 only) or "any" (any vote).
     Use for "what was that thing about X that I liked/disliked?".
     """
     db, embedder, user_id = await _ensure()
-    vec = await embedder.embed_query(consulta)
-    vote = {"liked": 1, "disliked": -1}.get(voto)  # None = any vote
-    rows = await db.recall_voted(user_id, vec, vote=vote, limit=limite)
+    vec = await embedder.embed_query(query)
+    vote = {"liked": 1, "disliked": -1}.get(vote)  # None = any vote
+    rows = await db.recall_voted(user_id, vec, vote=vote, limit=limit)
     if not rows:
-        return f"You haven't voted on anything about “{consulta}” yet."
+        return f"You haven't voted on anything about “{query}” yet."
     lines = []
     for i, r in enumerate(rows, start=1):
         mark = "❤️" if r["vote"] == 1 else "👎"
@@ -106,8 +106,8 @@ async def lembrar_votos(consulta: str, voto: str = "any", limite: int = 10) -> s
 
 
 @mcp.tool()
-async def ver_foco() -> str:
-    """Shows the active direction (/foco) for each bucket: 📦 repos and 🗞️ news."""
+async def see_focus() -> str:
+    """Shows the active direction (/focus) for each bucket: 📦 repos and 🗞️ news."""
     db, _embedder, user_id = await _ensure()
     lines = []
     for bucket, label in (("repos", "📦 repos"), ("news", "🗞️ news")):

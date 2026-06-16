@@ -14,7 +14,7 @@ This folder holds the project's **hand-editable configuration**: *where* the bot
 - **`seeds.example.yaml`** → template of the cold-start examples, per user. Structure: `users:` → one block per person with two lists:
   - `gold` — examples of what you **want** to receive (a dense post/discussion); accepts `text:` (pasted) and an optional `url:`;
   - `noise` — examples of what the curator **should reject** (basic tutorial, hype, clickbait).
-  - 3–5 of each is enough. **Connection:** it bootstraps two things at once — (1) the curator's *few-shot* (it already filters with your taste from the 1st message) and (2) the recall archive, entering as preloaded votes (`gold`=👍 / `noise`=👎, `origin='seed'`), so `/buscar` already works on day 1.
+  - 3–5 of each is enough. **Connection:** it bootstraps two things at once — (1) the curator's *few-shot* (it already filters with your taste from the 1st message) and (2) the recall archive, entering as preloaded votes (`gold`=👍 / `noise`=👎, `origin='seed'`), so `/search` already works on day 1.
 
 ## How to use (onboarding)
 

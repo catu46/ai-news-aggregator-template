@@ -352,7 +352,7 @@ class Database:
             return int(row["n"])
 
     async def all_active_focus_topics(self) -> list[str]:
-        """Topics with an active /foco (from any user) — they lower the curator's bar."""
+        """Topics with an active /focus (from any user) — they lower the curator's bar."""
         async with self.pool.acquire() as c:
             rows = await c.fetch(
                 "SELECT DISTINCT topic FROM focus "

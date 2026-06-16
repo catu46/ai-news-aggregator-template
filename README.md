@@ -9,23 +9,23 @@ A personal AI news and repos aggregator, **multi-tenant-ready**: it collects fro
 ## ✨ Features
 
 - **📦 / 🗞️ Morning digest once/day.** The digest arrives **once per day, at a fixed time** (`DIGEST_HOUR`/`DIGEST_TZ`, via `run_daily`) — a little morning "newspaper", not a "every 24h" trigger. It comes split into **repos** (GitHub) and **news** (Reddit + X), each ranked within itself — no mixing apples with oranges. Delivery only includes posts published in the last **30 days** (`DELIVERY_MAX_AGE_DAYS`).
-- **🏃 `/rodar` on demand.** Runs a **full cycle right now** — ingest → embed → curate → deliver — without waiting for the digest time. It has a lock to avoid running two cycles at the same time.
-- **🧠 Curation via Claude Haiku 4.5.** Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to cut costs. The **card summary comes out in PT-BR**. The active topics from `/foco` enter curation as *interests*, **loosening the bar** for on-topic content. A `SpendGuard` gracefully pauses curation when the monthly spending cap is hit. The **curator provider is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`).
+- **🏃 `/run` on demand.** Runs a **full cycle right now** — ingest → embed → curate → deliver — without waiting for the digest time. It has a lock to avoid running two cycles at the same time.
+- **🧠 Curation via Claude Haiku 4.5.** Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to cut costs. The **card summary comes out in PT-BR**. The active topics from `/focus` enter curation as *interests*, **loosening the bar** for on-topic content. A `SpendGuard` gracefully pauses curation when the monthly spending cap is hit. The **curator provider is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`).
 - **👍 / 👎 with PER-BUCKET affinity.** Your votes train the ranking, and affinity is **separated per bucket**: what you like in repos doesn't interfere with what shows up in news. Affinity only **ranks**, it never hides.
-- **🎯 `/foco` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — it widens the search on **X** (Latest + Top), on **Reddit** (top of day/week/month + hot) and on **GitHub**. And more: the **curator now listens to focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
-- **🔎 Conversational recall & `/buscar`.** Ask in the chat "did I like something about XPTO?" and the bot searches your vote archive semantically. `/buscar` does a semantic search over the curated archive and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — you can ask in PT-BR.
+- **🎯 `/focus` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — it widens the search on **X** (Latest + Top), on **Reddit** (top of day/week/month + hot) and on **GitHub**. And more: the **curator now listens to focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
+- **🔎 Conversational recall & `/search`.** Ask in the chat "did I like something about XPTO?" and the bot searches your vote archive semantically. `/search` does a semantic search over the curated archive and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — you can ask in PT-BR.
 - **⚖️ New × relevant rebalancing.** Adjust by speech how much of the digest is **freshness** (newer) vs **relevance** (affinity + focus) — and, beyond manual adjustment, the bot **auto-balances** by learning from your votes (it raises novelty if you like what's discovered by the freshness slot, lowers it if you reject it). It's saved in your settings.
-- **🔌 MCP server.** Plug your curated archive into Claude Code/Desktop and query it with `buscar_acervo`, `lembrar_votos` and `ver_foco`.
+- **🔌 MCP server.** Plug your curated archive into Claude Code/Desktop and query it with `search_archive`, `recall_votes` and `see_focus`.
 - **🔗 Pasted link = 👍.** Paste a URL in the chat: the bot reads the content via Jina Reader and saves it to your archive already as `origin='manual'` with a positive vote.
 
 ---
 
 ## 🏗️ Architecture
 
-Everything runs **inside the bot itself**: two jobs in the `JobQueue` (delivery **once/day** at a fixed time via `run_daily` at `DIGEST_HOUR`/`DIGEST_TZ`, pipeline every **30min**) — and `/rodar` forces a full cycle (ingest → embed → curate → deliver) at any time. **No separate cron needed.**
+Everything runs **inside the bot itself**: two jobs in the `JobQueue` (delivery **once/day** at a fixed time via `run_daily` at `DIGEST_HOUR`/`DIGEST_TZ`, pipeline every **30min**) — and `/run` forces a full cycle (ingest → embed → curate → deliver) at any time. **No separate cron needed.**
 
 ```
-                config/sources.yaml  +  active /foco (widens ingestion)
+                config/sources.yaml  +  active /focus (widens ingestion)
                                     │
         ┌───────────────────────────┼───────────────────────────┐
         ▼                           ▼                           ▼
@@ -42,10 +42,10 @@ Everything runs **inside the bot itself**: two jobs in the `JobQueue` (delivery 
                   ▼                                   ▼
         EMBED (Voyage voyage-4-lite)       CURATE (curator → Verdict, PT-BR summary)
         embedding IS NULL, batches 100     verdict IS NULL, batches 100
-                  │                        ▲ LISTENS to /foco (interests loosen the bar)
+                  │                        ▲ LISTENS to /focus (interests loosen the bar)
                   └─────────────────┬─────────────────┘  SpendGuard pauses $$
                                     ▼
-              DELIVERY IN 2 BUCKETS  (daily digest · /feed · /rodar)
+              DELIVERY IN 2 BUCKETS  (daily digest · /feed · /run)
               approved_undelivered (≤ 30 days)  →  ranks WITHIN the bucket:
                   📦 repos  = (github)
                   🗞️ news   = (reddit, twitter)
@@ -61,7 +61,7 @@ Everything runs **inside the bot itself**: two jobs in the `JobQueue` (delivery 
             └───────────────────────┼───────────────────────┘
                                     ▼
                  RECALL / MCP  →  search_pool · recall_voted · active_focus
-                    (/buscar, chat and the MCP server use the SAME methods)
+                    (/search, chat and the MCP server use the SAME methods)
 
                        ▸ EVERYTHING scoped by user_id ◂
 ```
@@ -70,19 +70,19 @@ Everything runs **inside the bot itself**: two jobs in the `JobQueue` (delivery 
 
 | Component | Path | Role |
 | --- | --- | --- |
-| **Telegram bot** | `src/bot/bot.py` | Delivery and interface (python-telegram-bot 22.8, long-polling). Locks to a `sources.yaml` allowlist, delivers the morning digest in 2 buckets (30-day cutoff), records inline votes, commands `/start /feed /rodar /buscar /foco`, saves pasted links and routes free chat to steer/recall/balance. Runs the `_job_deliver` (daily, fixed time via `run_daily`, with auto-balancing) and `_job_pipeline` (30min) jobs. |
-| **Pipeline runner** | `src/pipeline.py` | One `ingest → embed → curate` cycle, idempotent. Runs standalone (`python -m src.pipeline`), via the bot's job or via `/rodar`. The active topics from `/foco` enter ingestion (Reddit/X/GitHub) **and** curation (as *interests*). It does **not** deliver to Telegram. |
-| **Reddit source** | `src/ingestion/reddit_source.py` | Collects via the **public RSS/Atom feed** of the fixed subreddits; `/foco` topics (news) widen the search (top of day/week/month + hot). Parses with feedparser + BeautifulSoup. |
-| **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/foco` topics (repos) enter as extra queries. `GITHUB_TOKEN` optional. |
-| **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free cookie mode): `user-posts` and `search`, both `--json`. `/foco` topics (news) widen the search (Latest + Top). |
+| **Telegram bot** | `src/bot/bot.py` | Delivery and interface (python-telegram-bot 22.8, long-polling). Locks to a `sources.yaml` allowlist, delivers the morning digest in 2 buckets (30-day cutoff), records inline votes, commands `/start /feed /run /search /focus`, saves pasted links and routes free chat to steer/recall/balance. Runs the `_job_deliver` (daily, fixed time via `run_daily`, with auto-balancing) and `_job_pipeline` (30min) jobs. |
+| **Pipeline runner** | `src/pipeline.py` | One `ingest → embed → curate` cycle, idempotent. Runs standalone (`python -m src.pipeline`), via the bot's job or via `/run`. The active topics from `/focus` enter ingestion (Reddit/X/GitHub) **and** curation (as *interests*). It does **not** deliver to Telegram. |
+| **Reddit source** | `src/ingestion/reddit_source.py` | Collects via the **public RSS/Atom feed** of the fixed subreddits; `/focus` topics (news) widen the search (top of day/week/month + hot). Parses with feedparser + BeautifulSoup. |
+| **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/focus` topics (repos) enter as extra queries. `GITHUB_TOKEN` optional. |
+| **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free cookie mode): `user-posts` and `search`, both `--json`. `/focus` topics (news) widen the search (Latest + Top). |
 | **Source interface** | `src/ingestion/base.py` | `IngestionSource` ABC: every source implements `async fetch() -> list[IngestedPost]`. Dedup belongs to the database. |
-| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, PT-BR summary), with the `/foco` *interests* loosening the bar. `SpendGuard` persists spending and raises `BudgetExceeded`. |
-| **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/other) via Haiku. `steer` → directives for `/foco`; `recall` → searches the votes; `balance` → mixes new×relevant. |
+| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, PT-BR summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spending and raises `BudgetExceeded`. |
+| **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/other) via Haiku. `steer` → directives for `/focus`; `recall` → searches the votes; `balance` → mixes new×relevant. |
 | **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml` and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. |
 | **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. |
 | **Data models** | `src/common/models.py` | `IngestedPost` + Pydantic schemas of the Structured Outputs (`Verdict`, `FocusItem`, `ChatIntent`). |
 | **Embedder (Voyage)** | `src/common/embeddings.py` | Voyage AI wrapper (`voyage-4-lite`, 1024-dim, L2-normalized → cosine=dot). |
-| **MCP server** | `src/mcp_server/server.py` | FastMCP (stdio) that exposes the archive to Claude: `buscar_acervo`, `lembrar_votos`, `ver_foco`. |
+| **MCP server** | `src/mcp_server/server.py` | FastMCP (stdio) that exposes the archive to Claude: `search_archive`, `recall_votes`, `see_focus`. |
 | **SQL schema** | `db/schema.sql` | Postgres 15+/pgvector DDL: `users`, `posts` (shared pool), `deliveries`, `votes`, `focus`. HNSW index, `updated_at` triggers. |
 | **config/sources.yaml** | `config/sources.yaml` | Sources per user (multi-tenant). The bot's allowlist is derived from here. |
 
@@ -213,7 +213,7 @@ Before the first cycle, run the **seed** once to give the system a signal on day
 python -m src.seed
 ```
 
-It reads `config/seeds.yaml`, resolves each user by the `telegram_user_id` from `sources.yaml` and loads the examples as **preloaded votes** (`gold` → 👍, `noise` → 👎, `origin='seed'`), embedding each one. With that, `/buscar` and recall already **work on day 1**, before any real ingestion. It depends on **`DATABASE_URL`** and **`VOYAGE_API_KEY`** already configured (steps 2 and 3) and the schema already applied. It's idempotent: re-running doesn't duplicate (deterministic source_id). With no seeds filled in, it does nothing.
+It reads `config/seeds.yaml`, resolves each user by the `telegram_user_id` from `sources.yaml` and loads the examples as **preloaded votes** (`gold` → 👍, `noise` → 👎, `origin='seed'`), embedding each one. With that, `/search` and recall already **work on day 1**, before any real ingestion. It depends on **`DATABASE_URL`** and **`VOYAGE_API_KEY`** already configured (steps 2 and 3) and the schema already applied. It's idempotent: re-running doesn't duplicate (deterministic source_id). With no seeds filled in, it does nothing.
 
 > Note: the seed writes posts with `source_platform='seed'` — a value already accepted by the `CHECK` on `posts.source_platform` in `db/schema.sql` (alongside `github`/`manual`), nothing to configure.
 
@@ -223,7 +223,7 @@ Now bring up the bot:
 python -m src.bot.bot
 ```
 
-It brings up the bot in long-polling. The **delivery** (daily, at the fixed time of `DIGEST_HOUR`/`DIGEST_TZ`, via `run_daily`) and the **pipeline** ingest→embed→curate (30min) jobs run inside it. To force a full cycle at any time, send **`/rodar`** in the chat (ingest → embed → curate → deliver). To run just the pipeline manually, without the bot and without delivering:
+It brings up the bot in long-polling. The **delivery** (daily, at the fixed time of `DIGEST_HOUR`/`DIGEST_TZ`, via `run_daily`) and the **pipeline** ingest→embed→curate (30min) jobs run inside it. To force a full cycle at any time, send **`/run`** in the chat (ingest → embed → curate → deliver). To run just the pipeline manually, without the bot and without delivering:
 
 ```bash
 python -m src.pipeline
@@ -244,10 +244,10 @@ The project already ships with `Procfile` and `railway.json` (NIXPACKS, `restart
 ### 9. Plug into Claude (MCP)
 
 ```bash
-claude mcp add acervo -- .venv/bin/python -m src.mcp_server.server
+claude mcp add archive -- .venv/bin/python -m src.mcp_server.server
 ```
 
-The command matches `.mcp.json` and exposes `buscar_acervo`, `lembrar_votos` and `ver_foco` over your curated archive. To run the server directly in stdio:
+The command matches `.mcp.json` and exposes `search_archive`, `recall_votes` and `see_focus` over your curated archive. To run the server directly in stdio:
 
 ```bash
 python -m src.mcp_server.server
@@ -285,15 +285,15 @@ As a template, the recommended path is **each person spins up their own instance
 
 ## 🔌 Query via Claude (MCP)
 
-After `claude mcp add acervo`, Claude starts seeing your curated archive through these tools (thin shells over the `Database`, resolving "you" by the `TELEGRAM_USER_ID` from `.env` or by the 1st user in `sources.yaml`):
+After `claude mcp add archive`, Claude starts seeing your curated archive through these tools (thin shells over the `Database`, resolving "you" by the `TELEGRAM_USER_ID` from `.env` or by the 1st user in `sources.yaml`):
 
 | Tool | What it does |
 | --- | --- |
-| `buscar_acervo` | Semantic search over the pool of curated posts (`search_pool`). |
-| `lembrar_votos` | Recall over your 👍/👎 — "what have I already liked about X?" (`recall_voted`). |
-| `ver_foco` | Shows the active `/foco` per bucket (`active_focus`). |
+| `search_archive` | Semantic search over the pool of curated posts (`search_pool`). |
+| `recall_votes` | Recall over your 👍/👎 — "what have I already liked about X?" (`recall_voted`). |
+| `see_focus` | Shows the active `/focus` per bucket (`active_focus`). |
 
-These are the **same methods** that `/buscar` and chat (recall) use on Telegram — only now inside Claude.
+These are the **same methods** that `/search` and chat (recall) use on Telegram — only now inside Claude.
 
 ---
 
@@ -301,8 +301,8 @@ These are the **same methods** that `/buscar` and chat (recall) use on Telegram 
 
 ```
 src/
-  bot/bot.py              # Telegram interface + jobs (daily digest run_daily, pipeline 30min, /rodar)
-  pipeline.py             # 1 ingest→embed→curate cycle (idempotent, /foco enters ingestion and curation)
+  bot/bot.py              # Telegram interface + jobs (daily digest run_daily, pipeline 30min, /run)
+  pipeline.py             # 1 ingest→embed→curate cycle (idempotent, /focus enters ingestion and curation)
   seed.py                 # cold-start: loads seeds.yaml as votes (python -m src.seed)
   ingestion/
     base.py               # ABC IngestionSource
@@ -311,13 +311,13 @@ src/
     x_source.py           # twitter-cli via cookies (focus Latest + Top)
   curation/
     curator.py            # swappable curator (CURATOR_PROVIDER) + SpendGuard (Verdict, PT-BR summary)
-    steering.py           # chat → ChatIntent (steer/recall/balance) + translate_to_en for /buscar
+    steering.py           # chat → ChatIntent (steer/recall/balance) + translate_to_en for /search
   common/
     config.py             # .env + sources.yaml + seeds.yaml
     db.py                 # asyncpg + pgvector (scoped by user_id)
     models.py             # IngestedPost + Pydantic schemas
     embeddings.py         # Voyage voyage-4-lite
-  mcp_server/server.py    # FastMCP (buscar_acervo / lembrar_votos / ver_foco)
+  mcp_server/server.py    # FastMCP (search_archive / recall_votes / see_focus)
 db/schema.sql             # Postgres 15+/pgvector DDL
 db/reset.sql              # drops the schema's tables (DELETES data)
 config/sources.yaml       # sources per user (personal data, not a secret)

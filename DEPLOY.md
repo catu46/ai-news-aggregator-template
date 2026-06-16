@@ -63,7 +63,7 @@ secrets stay only in the environment variables, never in git.)
 
 ## 5. Cold-start (seed) — optional, once
 
-Loads `config/seeds.yaml` as preloaded votes, so that `/buscar`/recall already
+Loads `config/seeds.yaml` as preloaded votes, so that `/search`/recall already
 work on day 1. It's usually simpler to run it **locally**:
 
 ```bash

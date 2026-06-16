@@ -7,11 +7,11 @@ and deduplication by (source_platform, source_id) happens at upsert time.
 Steps:
     1. Setup    — load_settings, connect the Database, build the Embedder.
     2. Ingest   — collection from Reddit + GitHub + X (one source per user, built
-                  only when there are targets), with the active /foco topics
+                  only when there are targets), with the active /focus topics
                   injected into collection (repos→GitHub; news→Reddit+X).
     3. Embed    — embeds posts without an embedding, in batches.
     4. Curate   — global quality verdict via a swappable curator (make_curator;
-                  Anthropic Haiku by default, or Kimi), passing the active /foco
+                  Anthropic Haiku by default, or Kimi), passing the active /focus
                   interests. Respects the spend cap (BudgetExceeded).
 
 Delivery to Telegram does NOT happen here — it is the responsibility of the bot's
@@ -56,19 +56,19 @@ async def run_ingestion(db: Database) -> int:
 
     new_count = 0
     for user in sources:
-        # Active directions (/foco) inject topics into COLLECTION — on top of
+        # Active directions (/focus) inject topics into COLLECTION — on top of
         # re-ranking delivery in the bot. This way the focus actually PULLS in new
         # content, not just reorders what is already in the pool.
         user_id = await db.get_or_create_user(user.telegram_user_id, user.display_name)
         repos_focus = [r["topic"] for r in await db.active_focus(user_id, "repos")]
         news_focus = [r["topic"] for r in await db.active_focus(user_id, "news")]
 
-        # ---- Reddit (fixed subs + search by /foco topic) -------------------
+        # ---- Reddit (fixed subs + search by /focus topic) -------------------
         if user.subreddits or news_focus:
             reddit = RedditSource(
                 subreddits=user.subreddits,
                 user_agent=settings.reddit_user_agent,
-                searches=news_focus,  # /foco topics (news) also search Reddit
+                searches=news_focus,  # /focus topics (news) also search Reddit
             )
             new_count += await _ingest_source(db, reddit, user_key=user.key)
 
@@ -198,7 +198,7 @@ async def run_curation(db: Database, curator: Curator) -> int:
                 verdict = await curator.classify(
                     post_text=prefix + (record["raw_text"] or ""),
                     similarity_signal=None,  # global verdict: no user signal
-                    interests=interests,     # active topics (/foco) lower the bar
+                    interests=interests,     # active topics (/focus) lower the bar
                 )
             except BudgetExceeded as exc:
                 # Monthly spend cap reached: stop curating gracefully.
