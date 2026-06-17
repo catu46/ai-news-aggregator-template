@@ -114,14 +114,17 @@ with a monthly spend ceiling. The instruction "personas" are written in English
     only runs when the owner sends text WITHOUT a link. It never takes down the
     handler: it catches exceptions and returns `None` on failure/refusal/empty
     message.
-  - The five intents (`kind` in `ChatIntent`):
-    - `"steer"` -> steer the feed for a while; fills `directives` (by bucket
-      `repos`/`news`, a `topic` good for search in English, and `days`).
-    - `"recall"` -> FIND archive content on a topic; fills
-      `recall_query` (the topic, in English for technical topics) and `recall_polarity`.
-      The intent covers both what he already voted on and a **GENERAL question
-      about a topic** (e.g. "any news about AI venture capital?", "bring me new
-      stuff about agents"). The `recall_polarity`:
+  - The six intents (`kind` in `ChatIntent`):
+    - `"steer"` -> steer the feed (what it BRINGS going forward); fills `directives`
+      (by bucket `repos`/`news`, a `topic` good for search in English, `days`, and
+      a **`quota`** = how many bucket cards go to that topic — a number if stated,
+      0 if not, in which case the app ASKS). Desire/command phrasings are steer
+      ("I want news about X", "focus on X"), even without a number. CONTRAST:
+      "I want news about X" = steer; "IS THERE news about X?" = recall.
+    - `"recall"` -> a QUESTION/LOOKUP about what ALREADY exists (archive or your
+      votes); fills `recall_query` (the topic, in English for technical topics)
+      and `recall_polarity`. Signals: "is there...?", "what was...?", "did I
+      receive/like anything about...?". The `recall_polarity`:
       - `"any"` is the COMMON case — searches the **whole archive**, not just the
         votes. "New news about X" falls here.
       - `"liked"` ONLY when the owner explicitly says he LIKED / tapped 👍;
@@ -147,11 +150,15 @@ with a monthly spend ceiling. The instruction "personas" are written in English
       feed). Do NOT confuse with `steer` (which CHANGES the focus) nor `recall`
       (which searches CONTENT). The bot replies by reading the REAL state (the
       `focus` table + `settings->balance`).
+    - `"capacity"` -> change HOW MANY cards/day a bucket delivers (the digest
+      SIZE); fills `capacity_bucket` (`repos`/`news`/`both`) and `capacity_count`
+      (the new cap; 0 if no number → the app asks). "send me up to 20 news a day".
     - `"other"` -> small talk, a question, a thank-you.
   - `reply` in `ChatIntent` is always in English and short: on `steer` it
     confirms what it understood; on `recall` it says it'll look it up; on
-    `balance` it confirms the new mix; on `status` it stays empty/short (the app
-    shows the real focus/mix); on `other` it gives one line of guidance.
+    `balance` it confirms the new mix; on `capacity` it confirms the new size; on
+    `status` it stays empty/short (the app shows the real focus/mix); on `other`
+    it gives one line of guidance.
     It **never** claims to have EXECUTED an action the model doesn't control — on
     `other` it ONLY guides/clarifies: it is FORBIDDEN to say "done", "reverted",
     "reset", "undone", "cancelled" (the app does the executing, not the model) —
@@ -159,8 +166,9 @@ with a monthly spend ceiling. The instruction "personas" are written in English
     `balance_reset=true`), not `other`. Unused fields stay at their defaults
     (`directives=[]`, `recall_query=""`, `recall_polarity="any"`,
     `balance_bucket="both"`, `balance_fresh=0.4`, `balance_reset=false`,
-    `status_about="both"`). Timeframe hygiene: `days <= 0` becomes
-    `DEFAULT_FOCUS_DAYS` (14) and is capped at `MAX_FOCUS_DAYS` (60).
+    `status_about="both"`, `capacity_bucket="both"`, `capacity_count=0`; each
+    directive's `quota=0` when no number is stated). Timeframe hygiene: `days <= 0`
+    becomes `DEFAULT_FOCUS_DAYS` (14) and is capped at `MAX_FOCUS_DAYS` (60).
   - `Steerer.translate_to_en(text) -> str`: translates a short search query to
     English (the language the archive is embedded in) BEFORE embedding, which
     improves recall. It uses `messages.create` (not Structured Outputs) with the

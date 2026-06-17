@@ -65,18 +65,19 @@ class FocusItem(BaseModel):
     bucket: FocusBucket               # 'repos' (GitHub) or 'news' (X+Reddit)
     topic: str                        # short topic, GOOD FOR SEARCH (may be in English)
     days: int                         # validity in days (0 = use app default)
+    quota: int                        # # of bucket cards for this focus (0 = unstated -> app asks/uses default)
 
 
-ChatKind = Literal["steer", "recall", "balance", "status", "other"]
+ChatKind = Literal["steer", "recall", "balance", "status", "capacity", "other"]
 RecallPolarity = Literal["liked", "disliked", "any"]
 BalanceBucket = Literal["repos", "news", "both"]
 StatusAbout = Literal["focus", "balance", "both"]
 
 
 class ChatIntent(BaseModel):
-    """Intent of a chat message: steer / recall / rebalance / query state / other."""
+    """Intent of a chat message: steer / recall / rebalance / query state / resize / other."""
 
-    kind: ChatKind                    # steer | recall | balance | status | other
+    kind: ChatKind                    # steer | recall | balance | status | capacity | other
     directives: list[FocusItem]       # when kind="steer"
     recall_query: str                 # when kind="recall" (topic; "" otherwise)
     recall_polarity: RecallPolarity   # liked | disliked | any
@@ -84,4 +85,6 @@ class ChatIntent(BaseModel):
     balance_fresh: float              # 0..1: desired fraction of NEW content
     balance_reset: bool               # kind="balance": reset the mix to DEFAULT
     status_about: StatusAbout         # kind="status": focus | balance | both
+    capacity_bucket: BalanceBucket    # kind="capacity": which bucket to resize
+    capacity_count: int               # kind="capacity": new per-day card cap of the bucket
     reply: str                        # short confirmation/guidance in PT-BR

@@ -21,6 +21,7 @@ import re
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import httpx
 from telegram import (
     InlineKeyboardButton,
@@ -42,6 +43,7 @@ from ..common.config import Settings, load_settings, load_sources
 from ..common.db import Database
 from ..common.embeddings import Embedder
 from ..common.models import IngestedPost
+from ..common.recall import semantic_recall
 from ..curation.curator import make_curator
 from ..curation.steering import Steerer
 from ..pipeline import run_curation, run_embedding, run_ingestion
@@ -77,12 +79,26 @@ FRESH_SLOTS = {"repos": 2, "news": 4}
 _BUCKET_CAP = {key: cap for key, _h, _p, cap in BUCKETS}
 # Freshness: never delivers anything published more than N days ago (keeps undated posts).
 DELIVERY_MAX_AGE_DAYS = 30
+# Repeated-news dedup: a candidate within cosine distance DEDUP_MAX_DIST of
+# something ALREADY DELIVERED (same story, different source_id, sometimes another
+# source/day) is dropped — even if you liked it. Calibrated: same story <=0.18,
+# distinct stories >=0.28; 0.22 sits in the gap. DEDUP_SINCE_DAYS = "already received" window.
+DEDUP_MAX_DIST = 0.22
+DEDUP_SINCE_DAYS = 90
 # Auto-balancing: learns the new×relevant mix from YOUR votes. Only kicks in
 # with enough signal and runs once a day (in the delivery job, NOT in /feed). Small
 # step (EMA), so a manual adjustment via chat dominates for several days.
 AUTO_BALANCE_MIN_VOTES = 6
 AUTO_BALANCE_STEP = 0.15
 AUTO_BALANCE_BOUNDS = (0.15, 0.60)
+# Focus quota (A): how many bucket slots a /focus occupies. If you don't say a
+# number, the default is HALF the cap — focus prioritizes the topic but does NOT
+# monopolize (the remaining slots stay normal: freshness + affinity -> diversity returns).
+FOCUS_DEFAULT_QUOTA_FRACTION = 0.5
+# Digest size (B): per-day card cap per bucket, adjustable via chat and saved in
+# settings. Safety bounds for the requested value.
+DIGEST_SIZE_MIN = 1
+DIGEST_SIZE_MAX = 40
 # Page reader (clean markdown, no auth) for the "paste a link" feature.
 JINA_BASE = "https://r.jina.ai/"
 URL_RE = re.compile(r"https?://[^\s]+")
@@ -217,11 +233,29 @@ async def deliver_pending(app: Application, tune: bool = False) -> int:
             logger.exception("Failed to fetch pending items for user_id=%s", user_id)
             continue
 
-        for bucket_key, header, platforms, cap in BUCKETS:
+        # Repeated-news dedup: drop candidates near something already delivered
+        # (same story from another source/day) — over the whole pool, before
+        # bucketing, so it covers repos AND news.
+        try:
+            delivered_embs = await db.delivered_embeddings(
+                user_id, since_days=DEDUP_SINCE_DAYS
+            )
+            before = len(pending)
+            pending = _dedup_pending(pending, delivered_embs)
+            if before != len(pending):
+                logger.info(
+                    "dedup: %d -> %d candidates (user_id=%s)",
+                    before, len(pending), user_id,
+                )
+        except Exception:  # pragma: no cover - dedup never breaks delivery
+            logger.exception("dedup failed (user_id=%s); proceeding without it", user_id)
+
+        for bucket_key, header, platforms, _cap in BUCKETS:
             if tune:  # learns this bucket's new×relevant mix (once a day)
                 await _auto_tune_balance(db, user_id, bucket_key, list(platforms))
             recs = [r for r in pending if r["source_platform"] in platforms]
             if recs:
+                cap = await _bucket_cap(db, user_id, bucket_key)  # adjustable cap (B)
                 sent_total += await _deliver_bucket(
                     app, db, telegram_user_id, user_id,
                     bucket_key, header, list(platforms), cap, recs,
@@ -273,6 +307,32 @@ async def _auto_tune_balance(
         )
 
 
+def _dedup_pending(recs: list, delivered_embs: list) -> list:
+    """Drop candidates near-identical to something ALREADY DELIVERED (same story
+    from another source/day) and to each other — keeping the first of each group
+    (newest, since `recs` is already published_at-desc).
+
+    Runs over the WHOLE pool before bucketing, so it covers repos AND news.
+    Vectors are L2-normalized -> cosine = inner product; cuts when similarity to
+    anything seen exceeds (1 - DEDUP_MAX_DIST). Calibrated on news (same story
+    <=0.18, distinct >=0.28); 0.22 is conservative enough not to merge distinct repos.
+    """
+    seen = [np.asarray(e, dtype=float) for e in delivered_embs if e is not None]
+    seen_mat = np.vstack(seen) if seen else None
+    kept = []
+    for rec in recs:
+        emb = rec["embedding"]
+        if emb is None:
+            kept.append(rec)
+            continue
+        v = np.asarray(emb, dtype=float)
+        if seen_mat is not None and float((seen_mat @ v).max()) >= 1.0 - DEDUP_MAX_DIST:
+            continue  # near-duplicate of something delivered/chosen -> skip
+        kept.append(rec)
+        seen_mat = v[None, :] if seen_mat is None else np.vstack([seen_mat, v])
+    return kept
+
+
 def _pub_ts(rec) -> float:
     """Publication timestamp for ordering by freshness (0 when absent)."""
     pa = rec["published_at"]
@@ -293,6 +353,31 @@ def _focus_boost(emb, focuses) -> float:
         sim = float(emb @ femb)  # cosine (normalized vectors)
         boost += float(f["weight"]) * max(0.0, sim)
     return boost
+
+
+async def _bucket_cap(db: Database, user_id: int, bucket_key: str) -> int:
+    """Per-day card cap of the bucket: the user's override (B) or the BUCKETS default."""
+    n = await db.get_digest_size(user_id, bucket_key)
+    if n is None:
+        n = _BUCKET_CAP.get(bucket_key, 1)
+    return max(DIGEST_SIZE_MIN, min(int(n), DIGEST_SIZE_MAX))
+
+
+def _focus_quota(focuses, cap: int) -> int:
+    """How many bucket slots the /focus occupies (A). Uses the largest explicit
+    quota among active focuses; if none has a number, the default (half the cap). 1..cap."""
+    quotas = [int(f["quota"]) for f in focuses if f["quota"] is not None]
+    q = max(quotas) if quotas else round(cap * FOCUS_DEFAULT_QUOTA_FRACTION)
+    return max(1, min(q, cap))
+
+
+async def _fresh_reserve(db: Database, user_id: int, bucket_key: str, slots: int) -> int:
+    """Of the `slots` NORMAL slots, how many go to freshness (the rest to relevance).
+    Uses the saved mix (/balance) if any, else the bucket's default reserve."""
+    frac = await db.get_balance(user_id, bucket_key)
+    if frac is None:
+        return min(FRESH_SLOTS.get(bucket_key, 0), slots)
+    return min(round(max(0.0, min(1.0, frac)) * slots), slots)
 
 
 async def _deliver_bucket(
@@ -335,31 +420,40 @@ async def _deliver_bucket(
     scored.sort(key=lambda t: t[1], reverse=True)
     score_by_id = {rec["id"]: score for rec, score in scored}
 
-    # Splits the bucket's slots: most go to relevance (affinity + focus) and
-    # a reserve goes to the NEWEST not yet chosen. The rest (relevant but
-    # not delivered today) stays a candidate in the next digests.
-    if focuses:  # with FOCO active: no freshness reserve -> everything by relevance
-        fresh_quota = 0   # otherwise a new off-topic post jumps the /focus queue
-    else:
-        frac = await db.get_balance(user_id, bucket_key)
-        if frac is None:  # no saved preference -> bucket's default reserve
-            fresh_quota = min(FRESH_SLOTS.get(bucket_key, 0), cap)
-        else:             # you adjusted the mix via chat (/balance)
-            fresh_quota = min(round(max(0.0, min(1.0, frac)) * cap), cap)
-    relevant_quota = cap - fresh_quota
+    # Splits the bucket's slots into two portions:
+    #   (1) FOCUS (A): occupies `fq` slots with the top by score (focus-weighted);
+    #   (2) NORMAL: the rest of the cap, split freshness × relevance over whoever
+    #       is left — this is what brings diversity/platform back (e.g. Reddit
+    #       doesn't vanish when the focus is concentrated on X). With no focus,
+    #       fq=0 and the whole bucket is the normal portion (the usual behavior).
     chosen, chosen_ids = [], set()
-    for rec, _ in scored:                      # relevance slots
-        if len(chosen) >= relevant_quota:
-            break
-        chosen.append(rec)
-        chosen_ids.add(rec["id"])
-    rest = [rec for rec, _ in scored if rec["id"] not in chosen_ids]
-    rest.sort(key=_pub_ts, reverse=True)       # freshness slots: the newest
-    for rec in rest:
-        if len(chosen) >= cap:
-            break
-        chosen.append(rec)
-        chosen_ids.add(rec["id"])
+    if focuses:
+        fq = _focus_quota(focuses, cap)
+        for rec, _ in scored:                  # focus occupies fq slots (top score)
+            if len(chosen) >= fq:
+                break
+            chosen.append(rec)
+            chosen_ids.add(rec["id"])
+
+    normal_slots = cap - len(chosen)
+    if normal_slots > 0:
+        leftovers = [(rec, s) for rec, s in scored if rec["id"] not in chosen_ids]
+        fresh_quota = await _fresh_reserve(db, user_id, bucket_key, normal_slots)
+        relevant_quota = normal_slots - fresh_quota
+        taken_rel = 0
+        for rec, _ in leftovers:               # relevance slots (by score)
+            if taken_rel >= relevant_quota:
+                break
+            chosen.append(rec)
+            chosen_ids.add(rec["id"])
+            taken_rel += 1
+        rest = [rec for rec, _ in leftovers if rec["id"] not in chosen_ids]
+        rest.sort(key=_pub_ts, reverse=True)   # freshness slots: the newest
+        for rec in rest:
+            if len(chosen) >= cap:
+                break
+            chosen.append(rec)
+            chosen_ids.add(rec["id"])
 
     # The header gets a note when there's an active direction in this bucket.
     if focuses:
@@ -445,9 +539,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /search <query> — semantic search over your archive (❤️ = liked)\n"
         "• /focus — view/clear the feed's current direction\n"
         "• /mix — view the current new×relevant balance\n"
-        "• just talk to me — steer (“for 3 days I want repos about RAG”), "
-        "ask (“what was that news about agents that I liked?”) "
-        "or query the state (“what's in focus?”, “what's the mix?”)\n"
+        "• just talk to me — steer (“for 3 days I want up to 6 news about RAG”), "
+        "ask (“what was that news about agents that I liked?”), "
+        "query the state (“what's in focus?”) or resize (“up to 20 news a day”)\n"
         "• paste a link — I'll read the page and save it to your archive\n\n"
         "Use 👍/👎 on the cards: each bucket learns your taste separately."
     )
@@ -514,8 +608,11 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # The archive is embedded in English -> translate the query before searching.
         # (Chat recall already arrives in English, from the Steerer's parser.)
         q_en = await context.application.bot_data[KEY_STEERER].translate_to_en(query_text)
-        vec = await _embedder(context).embed_query(q_en)
-        matches = await _db(context).search_pool(user_id, vec, limit=SEARCH_LIMIT)
+        # Two-stage search: broad vector recall -> rerank (relevance cut).
+        matches = await semantic_recall(
+            _db(context), _embedder(context), user_id, q_en,
+            mode="archive", limit=SEARCH_LIMIT,
+        )
     except Exception:  # pragma: no cover
         logger.exception("Search failed for tg=%s", user.id)
         await update.effective_message.reply_text("The search went wrong. Try again?")
@@ -547,11 +644,13 @@ async def _render_focus(db, user_id: int) -> str:
     lines = ["🎯 Active focus:"]
     any_focus = False
     for bucket_key, lbl in (("repos", "📦 repos"), ("news", "🗞️ news")):
+        cap = await _bucket_cap(db, user_id, bucket_key)
         for r in await db.active_focus(user_id, bucket_key):
             any_focus = True
-            lines.append(f"• {lbl} → {r['topic']}")
+            q = _focus_quota([r], cap)  # effective quota (explicit or default)
+            lines.append(f"• {lbl} → {r['topic']}  (up to {q} of {cap})")
     if not any_focus:
-        return "No active focus. Tell me something like “for 3 days I want repos about RAG”."
+        return "No active focus. Tell me something like “for 3 days I want up to 6 repos about RAG”."
     lines.append("\n/focus clear to clear it.")
     return "\n".join(lines)
 
@@ -562,6 +661,8 @@ async def _render_mixture(db, user_id: int) -> str:
     label = {"repos": "📦 repos", "news": "🗞️ news"}
     lines = ["⚖️ Current mix (novelty / relevance):"]
     for bucket_key in ("repos", "news"):
+        cap = await _bucket_cap(db, user_id, bucket_key)
+        size_tag = "default" if await db.get_digest_size(user_id, bucket_key) is None else "adjusted"
         frac = await db.get_balance(user_id, bucket_key)
         if frac is None:  # no saved adjustment -> bucket's default reserve
             f = FRESH_SLOTS.get(bucket_key, 0) / max(1, _BUCKET_CAP.get(bucket_key, 1))
@@ -571,11 +672,13 @@ async def _render_mixture(db, user_id: int) -> str:
             tag = "adjusted"
         pct = round(f * 100)
         lines.append(
-            f"• {label[bucket_key]}: ~{pct}% novelty / {100 - pct}% relevance ({tag})"
+            f"• {label[bucket_key]}: ~{pct}% novelty / {100 - pct}% relevance ({tag}) "
+            f"· up to {cap}/day ({size_tag})"
         )
     lines.append(
-        "\nThe bot auto-adjusts from your votes (starting at ~6 votes in the bucket). "
-        "To change it by hand: just say it (e.g. “more novelty in the news”). To reset: “undo that”."
+        "\nThe bot auto-adjusts the mix from your votes (starting at ~6 votes in the bucket). "
+        "To change by hand: just say it (e.g. “more novelty in the news”, “up to 20 news/day”). "
+        "To reset the mix: “undo that”."
     )
     return "\n".join(lines)
 
@@ -588,6 +691,10 @@ async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     arg = " ".join(context.args).strip() if context.args else ""
     user_id = await _resolve_user_id(context, user.id)
     db = _db(context)
+    # Any /focus is an explicit focus action -> cancel a pending quota Q&A
+    # (otherwise a stray number afterwards would re-create a just-cleared focus).
+    if context.user_data is not None:
+        context.user_data.pop("pending_focus", None)
 
     if arg.lower() in ("clear", "off", "reset"):
         n = await db.clear_focus(user_id)
@@ -656,6 +763,7 @@ _CHAT_HINT = (
     "that I liked?”\n"
     "• query the feed's state — e.g.: “what's in focus?”, “what's the mix "
     "now?”, “how's my feed?”\n"
+    "• resize the digest — e.g.: “up to 20 news a day”, “8 repos a day”\n"
     "• or paste a link for me to save to the archive."
 )
 
@@ -664,6 +772,19 @@ async def _handle_chat(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
 ) -> None:
     """Routes a text message: feed direction / vote recall / hint."""
+    # C — focus Q&A: if a focus is awaiting "how many?", this message may be the
+    # answer. If it's a number/"all", complete it; otherwise abandon the question
+    # and proceed normally (don't hijack an unrelated message).
+    pending = context.user_data.get("pending_focus") if context.user_data is not None else None
+    if pending:
+        db = _db(context)
+        user_id = await _resolve_user_id(context, update.effective_user.id)
+        q = _parse_quota(text, await _bucket_cap(db, user_id, pending["bucket"]))
+        if q is not None:
+            await _complete_pending_focus(update, context, pending, q)
+            return
+        context.user_data.pop("pending_focus", None)  # not an answer -> proceed
+
     parser: Steerer = context.application.bot_data[KEY_STEERER]
     intent = await parser.parse(text)
     if intent is None:
@@ -680,6 +801,11 @@ async def _handle_chat(
         return
     if intent.kind == "steer" and intent.directives:
         await _apply_focus(update, context, intent.directives)
+        return
+    if intent.kind == "capacity":
+        await _apply_capacity(
+            update, context, intent.capacity_bucket, intent.capacity_count
+        )
         return
     if intent.kind == "status":
         await _do_status(update, context, intent.status_about)
@@ -704,18 +830,63 @@ async def _do_status(
     await update.effective_message.reply_text("\n\n".join(parts))
 
 
+_BUCKET_LABEL = {"repos": "📦 repos", "news": "🗞️ news"}
+
+
+def _parse_quota(text: str, cap: int) -> int | None:
+    """Reads the quantity from a SHORT reply to "how many?" ("6", "up to 6", "a
+    couple", "all", "half"). Returns 1..cap, or None.
+
+    IMPORTANT: only matches a short quantity reply — NOT a new sentence that
+    happens to contain a digit ("anything about GPT-4?", "send me 20 news a day").
+    So if the user abandons the Q&A and sends something else, this returns None
+    and the message follows normal routing (without hijacking the new intent)."""
+    t = (text or "").strip().lower()
+    if re.search(r"\b(all|everything|max|maximum)\b", t):
+        return cap
+    if re.search(r"\bhalf\b", t):
+        return max(1, round(cap / 2))
+    # exactly ONE number, optionally with "up to/about/~/=" before and
+    # "cards/items/posts" after — and NO free text beyond that.
+    m = re.fullmatch(
+        r"(?:up to\s+|at[eé]\s+|about\s+|~\s*|=\s*)?(\d{1,3})\s*(?:cards?|items?|posts?)?",
+        t,
+    )
+    if m:
+        return max(1, min(int(m.group(1)), cap))
+    return None
+
+
 async def _apply_focus(
     update: Update, context: ContextTypes.DEFAULT_TYPE, directives
 ) -> None:
-    """Embeds each topic and writes to `focus` (replaces the bucket's previous direction)."""
+    """Applies /focus. Each direction occupies a QUOTA of the bucket's slots (A);
+    if a SINGLE direction comes WITHOUT a number, the bot ASKS how many (C) and waits."""
     user_id = await _resolve_user_id(context, update.effective_user.id)
     embedder = _embedder(context)
     db = _db(context)
+
+    # C — a single direction without a quota: ask "how many?" and store pending.
+    if len(directives) == 1 and directives[0].quota <= 0:
+        d = directives[0]
+        cap = await _bucket_cap(db, user_id, d.bucket)
+        if context.user_data is not None:
+            context.user_data["pending_focus"] = {
+                "bucket": d.bucket, "topic": d.topic, "days": d.days,
+            }
+        lbl = _BUCKET_LABEL.get(d.bucket, d.bucket)
+        await update.effective_message.reply_text(
+            f"Got it! Of the up-to-{cap} {lbl} cards, how many should be about "
+            f"“{d.topic}”? Send a number (or “all”). The rest of the bucket stays normal."
+        )
+        return
+
     applied = []
     for d in directives:
         try:
             vec = await embedder.embed_query(d.topic)
-            await db.set_focus(user_id, d.bucket, d.topic, vec, d.days)
+            quota = d.quota if d.quota > 0 else None  # None = default (half the cap)
+            await db.set_focus(user_id, d.bucket, d.topic, vec, d.days, quota=quota)
             applied.append(d)
         except Exception:  # pragma: no cover
             logger.exception("steering: failed to apply focus %s/%s", d.bucket, d.topic)
@@ -723,16 +894,70 @@ async def _apply_focus(
         await update.effective_message.reply_text("I tried to adjust the focus but it errored out. 😬")
         return
 
-    label = {"repos": "📦 repos", "news": "🗞️ news"}
     lines = ["🎯 Focus updated:"]
     for d in applied:
-        lines.append(f"• {label.get(d.bucket, d.bucket)} → {d.topic}  ({d.days} day(s))")
+        cap = await _bucket_cap(db, user_id, d.bucket)
+        q = _focus_quota([{"quota": d.quota if d.quota > 0 else None}], cap)
+        lines.append(
+            f"• {_BUCKET_LABEL.get(d.bucket, d.bucket)} → {d.topic}  "
+            f"(up to {q} of {cap}, {d.days} day(s))"
+        )
     lines.append("")
     lines.append(
-        "I'll prioritize this in delivery and start fetching more on this topic.\n"
-        "/focus shows what's active · /focus clear clears it."
+        "I'll prioritize this in delivery (the rest of the bucket stays normal) and "
+        "start fetching more on this topic.\n/focus shows what's active · /focus clear clears it."
     )
     await update.effective_message.reply_text("\n".join(lines))
+
+
+async def _complete_pending_focus(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pending: dict, quota: int
+) -> None:
+    """C — completes the focus that was awaiting its quantity (the Q&A reply)."""
+    if context.user_data is not None:
+        context.user_data.pop("pending_focus", None)
+    user_id = await _resolve_user_id(context, update.effective_user.id)
+    db = _db(context)
+    embedder = _embedder(context)
+    cap = await _bucket_cap(db, user_id, pending["bucket"])
+    try:
+        vec = await embedder.embed_query(pending["topic"])
+        await db.set_focus(
+            user_id, pending["bucket"], pending["topic"], vec, pending["days"],
+            quota=quota,
+        )
+    except Exception:  # pragma: no cover
+        logger.exception("steering: failed to complete pending focus")
+        await update.effective_message.reply_text("I tried to adjust the focus but it errored out. 😬")
+        return
+    lbl = _BUCKET_LABEL.get(pending["bucket"], pending["bucket"])
+    await update.effective_message.reply_text(
+        f"🎯 Focus: {lbl} → {pending['topic']} — up to {quota} of {cap}. "
+        f"The rest of the bucket stays normal (freshness + your taste)."
+    )
+
+
+async def _apply_capacity(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, bucket: str, count: int
+) -> None:
+    """B — changes a bucket's per-day card cap (or both). Saved in settings."""
+    user_id = await _resolve_user_id(context, update.effective_user.id)
+    db = _db(context)
+    if not count or count <= 0:  # no number -> ask (can't guess +/-)
+        await update.effective_message.reply_text(
+            "How many cards per day do you want? E.g. “up to 20 news a day” or "
+            "“8 repos a day”."
+        )
+        return
+    n = max(DIGEST_SIZE_MIN, min(int(count), DIGEST_SIZE_MAX))
+    buckets = ["repos", "news"] if bucket == "both" else [bucket]
+    for b in buckets:
+        await db.set_digest_size(user_id, b, n)
+    names = " and ".join(_BUCKET_LABEL.get(b, b) for b in buckets)
+    extra = "" if n == count else f" (capped at {n}, max {DIGEST_SIZE_MAX})"
+    await update.effective_message.reply_text(
+        f"📐 Digest size: {names} → up to {n} card(s)/day{extra}."
+    )
 
 
 async def _apply_balance(
@@ -769,14 +994,18 @@ async def _do_recall(
     recalls only what you voted on. (The query already comes in English from the parser.)"""
     user_id = await _resolve_user_id(context, update.effective_user.id)
     db = _db(context)
+    embedder = _embedder(context)
     try:
-        vec = await _embedder(context).embed_query(query)
         if polarity in ("liked", "disliked"):
             vote = 1 if polarity == "liked" else -1
-            rows = await db.recall_voted(user_id, vec, vote=vote, limit=SEARCH_LIMIT)
+            rows = await semantic_recall(
+                db, embedder, user_id, query, mode="voted", vote=vote, limit=SEARCH_LIMIT
+            )
             mode = "voted"
         else:  # 'any' -> the whole curated archive (not just your votes)
-            rows = await db.search_pool(user_id, vec, limit=SEARCH_LIMIT)
+            rows = await semantic_recall(
+                db, embedder, user_id, query, mode="archive", limit=SEARCH_LIMIT
+            )
             mode = "archive"
     except Exception:  # pragma: no cover
         logger.exception("recall failed for tg=%s", update.effective_user.id)

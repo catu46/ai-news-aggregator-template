@@ -1,7 +1,8 @@
 # Pipeline (Python 3.12, asyncio)
 anthropic>=0.40            # curador Haiku 4.5 + Structured Outputs
-voyageai>=0.3.0            # embeddings voyage-4-lite
-feedparser>=6.0            # Reddit via feed RSS/Atom (o .json passou a dar 403)
+voyageai>=0.3.0            # embeddings voyage-4-lite + reranker rerank-2.5 (2-stage search)
+numpy>=1.26               # delivery dedup in src/bot/bot.py (_dedup_pending: asarray/vstack/matmul); direct import, not just transitive
+feedparser>=6.0            # Reddit via public RSS/Atom feed (the .json endpoint 403s)
 beautifulsoup4>=4.12       # extrai texto do HTML dos feeds do Reddit
 python-telegram-bot[job-queue]==22.8  # bot + inline 👍/👎 (long-polling) + JobQueue (entrega auto)
 asyncpg>=0.30              # Postgres (Supabase) async

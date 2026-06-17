@@ -25,14 +25,14 @@ mixes — it's the same multi-tenant isolation as the rest of the project.
     `db.get_or_create_user(...)`, and every search is filtered by that user.
   - **`_headline(...)`** — formatting-only helper: takes the 1st non-empty line of
     a text and truncates it at 160 chars, so each item becomes a short single line.
-  - **The 3 tools (each one is thin over 1 method of the `Database`):**
-    - `search_archive(query, limit=10)` → embeds the query and calls
-      `db.search_pool(...)`. Semantic search over the archive (approved + what you
-      saved/liked); marks liked items with ❤️.
-    - `recall_votes(query, vote="any", limit=10)` → calls
-      `db.recall_voted(...)`. Recalls what YOU voted on a topic. `vote`:
-      `"liked"` (👍, becomes `1`), `"disliked"` (👎, becomes `-1`) or `"any"` (any
-      vote, becomes `None`).
+  - **The 3 tools (search uses the same `recall.semantic_recall` as the bot — 2
+    stages: broad vector recall → rerank):**
+    - `search_archive(query, limit=10)` → `semantic_recall(mode="archive")`.
+      Semantic search over the archive (approved + what you saved/liked); marks
+      liked items with ❤️.
+    - `recall_votes(query, vote="any", limit=10)` → `semantic_recall(mode="voted")`.
+      Recalls what YOU voted on a topic. `vote`: `"liked"` (👍, becomes `1`),
+      `"disliked"` (👎, becomes `-1`) or `"any"` (any vote, becomes `None`).
     - `see_focus()` → calls `db.active_focus(...)` for the `repos` and `news`
       buckets and shows the active direction (`/focus`) of each one (📦 repos / 🗞️ news).
   - **`main()`** — starts the server with `mcp.run()` (stdio, the default mode for

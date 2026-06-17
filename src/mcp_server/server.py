@@ -23,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from ..common.config import load_settings, load_sources
 from ..common.db import Database
 from ..common.embeddings import Embedder
+from ..common.recall import semantic_recall
 
 mcp = FastMCP("archive-ai")
 
@@ -71,8 +72,7 @@ async def search_archive(query: str, limit: int = 10) -> str:
     Use it for "is there anything in my archive about X?". ❤️ marks what you liked.
     """
     db, embedder, user_id = await _ensure()
-    vec = await embedder.embed_query(query)
-    rows = await db.search_pool(user_id, vec, limit=limit)
+    rows = await semantic_recall(db, embedder, user_id, query, mode="archive", limit=limit)
     if not rows:
         return f"Nothing in the archive about “{query}”."
     lines = []
@@ -93,9 +93,10 @@ async def recall_votes(query: str, vote: str = "any", limit: int = 10) -> str:
     Use it for "what was that thing about X I liked/disliked?".
     """
     db, embedder, user_id = await _ensure()
-    vec = await embedder.embed_query(query)
     vote = {"liked": 1, "disliked": -1}.get(vote)  # None = any vote
-    rows = await db.recall_voted(user_id, vec, vote=vote, limit=limit)
+    rows = await semantic_recall(
+        db, embedder, user_id, query, mode="voted", vote=vote, limit=limit
+    )
     if not rows:
         return f"You haven't voted on anything about “{query}” yet."
     lines = []

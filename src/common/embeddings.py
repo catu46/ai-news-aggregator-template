@@ -15,6 +15,28 @@ class Embedder:
         self._client = voyageai.Client(api_key=settings.voyage_api_key)
         self._model = settings.embedding_model
         self.model = settings.embedding_model  # public (e.g. bot when saving a link)
+        self._rerank_model = settings.rerank_model
+
+    async def rerank(
+        self, query: str, documents: list[str], top_k: int | None = None
+    ) -> list[tuple[int, float]]:
+        """Reorder `documents` by REAL relevance to `query` (Voyage cross-encoder).
+
+        Cosine distance alone doesn't separate well in a single-domain archive
+        (everything AI is close to everything); the reranker reads query+text
+        TOGETHER and gives a 0..1 relevance score that actually separates.
+        Returns a list of (index_in_documents, score) sorted by score desc; `[]`
+        if empty. This is the 2nd stage of the search (see recall.py)."""
+        if not documents:
+            return []
+
+        def _call() -> list[tuple[int, float]]:
+            res = self._client.rerank(
+                query, documents, model=self._rerank_model, top_k=top_k
+            )
+            return [(r.index, float(r.relevance_score)) for r in res.results]
+
+        return await asyncio.to_thread(_call)
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embeddings for posts (input_type='document')."""

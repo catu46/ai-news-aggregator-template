@@ -117,6 +117,7 @@ CREATE TABLE focus (
     topic       TEXT        NOT NULL,                  -- topic, good for search
     embedding   vector(1024),                          -- to re-rank delivery
     weight      REAL        NOT NULL DEFAULT 1.2,
+    quota       INT,                                   -- # of bucket slots for this focus (NULL = default: half the cap)
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ                             -- NULL = no expiry
 );

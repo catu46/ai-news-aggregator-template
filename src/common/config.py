@@ -28,6 +28,7 @@ class Settings:
     curator_monthly_budget_usd: float
     voyage_api_key: str
     embedding_model: str
+    rerank_model: str              # Voyage reranker for the 2-stage search
     reddit_user_agent: str
     twitter_auth_token: str | None
     twitter_ct0: str | None
@@ -50,6 +51,7 @@ def load_settings() -> Settings:
         curator_monthly_budget_usd=float(_env("CURATOR_MONTHLY_BUDGET_USD", "8")),
         voyage_api_key=_env("VOYAGE_API_KEY", required=True),
         embedding_model=_env("EMBEDDING_MODEL", "voyage-4-lite"),
+        rerank_model=_env("RERANK_MODEL", "rerank-2.5"),
         reddit_user_agent=_env(
             "REDDIT_USER_AGENT",
             "ai-news-aggregator/1.0 (personal, non-commercial)",

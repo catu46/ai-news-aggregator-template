@@ -33,9 +33,9 @@ sources (config/sources.yaml, per user) + active /focus topics
         ├── BALANCE       (by speech: new × relevant mix; saved in the user's settings)
         └── AUTO-BALANCE  (1x/day, in the daily job: learns the new×relevant mix from YOUR votes)
         │
-   RECALL / MCP  →  search_pool · recall_voted · active_focus  (the same methods serve /search, chat, and the MCP)
-                  ▸ chat recall: a GENERAL question ('any') searches the WHOLE archive (search_pool), and the search has a relevance FLOOR ◂
-                  ▸ 'liked'/'disliked' recalls only what YOU voted on (recall_voted) ◂
+   RECALL / MCP  →  semantic_recall (2 stages: broad vector recall → RERANK) · active_focus  (serves /search, chat, and the MCP)
+                  ▸ chat recall: a GENERAL question ('any') searches the WHOLE archive (mode=archive); the RERANKER does the relevance cut (cosine alone can't separate in a single-domain archive) ◂
+                  ▸ 'liked'/'disliked' recalls only what YOU voted on (mode=voted) ◂
 
                   ▸ EVERYTHING scoped by user_id (derived from telegram_user_id) ◂
 ```
@@ -83,12 +83,13 @@ Prerequisites: `python -m venv .venv && source .venv/bin/activate && pip install
 - Add/adjust an ingestion source → `src/ingestion/` (`reddit_source.py`, `github_source.py`, `x_source.py`); the contract is `src/ingestion/base.py` (`IngestionSource.fetch()`).
 - Cycle orchestration (ingest/embed/curate order, batches) and how /focus injects topics into ingestion (Reddit+X for news, GitHub for repos) and into the curator's `interests` → `src/pipeline.py`.
 - Swap the curator (Anthropic/Kimi) or adjust the quality rubric/budget → `src/curation/curator.py` (`make_curator`, `AnthropicCurator`, `KimiCurator`, `SpendGuard`, `BudgetExceeded`); the prompt is in `src/curation/prompt.py`.
-- How free chat becomes intent (steer/recall/balance/status) → `src/curation/steering.py`.
-- Swap the embeddings model → `src/common/embeddings.py`.
-- SQL queries, database access, recall/affinity methods → `src/common/db.py`.
+- How free chat becomes intent (steer/recall/balance/status/capacity) → `src/curation/steering.py`.
+- Swap the embeddings model or the reranker (`Embedder.rerank`) → `src/common/embeddings.py`.
+- Two-stage semantic search (vector recall → rerank, thresholds) → `src/common/recall.py`.
+- SQL queries, database access, recall/affinity methods, already-delivered embeddings (dedup) → `src/common/db.py`.
 - Data schemas (`IngestedPost`, `Verdict`, `FocusItem`, `ChatIntent`) → `src/common/models.py`.
 - Environment variables and YAML parsing → `src/common/config.py` (and the templates in `.env.example`, `config/*.example.yaml`).
-- Telegram commands (`/start`, `/feed`, `/run`, `/search`, `/focus`, `/mix`), card formatting, votes, 2-bucket delivery ranking, freshness cutoff (30d), auto-balancing, chat recall (a general question searches the archive via `search_pool`; "undo that" resets the mix), chat state queries (`_do_status`: "what's in focus?"/"what's the mix?"), digest time (`DIGEST_HOUR`) and the two jobs → `src/bot/bot.py`.
+- Telegram commands (`/start`, `/feed`, `/run`, `/search`, `/focus`, `/mix`), card formatting, votes, 2-bucket delivery ranking with focus quota + adjustable digest size, freshness cutoff (30d), repeated-news dedup (`_dedup_pending`), auto-balancing, chat recall (a general question searches the archive via `semantic_recall`; "undo that" resets the mix), chat state queries + resize (`_do_status`/`_apply_capacity`), digest time (`DIGEST_HOUR`) and the two jobs → `src/bot/bot.py`.
 - Tools exposed to Claude (`search_archive`, `recall_votes`, `see_focus`) → `src/mcp_server/server.py`.
 - Tables, indexes (HNSW), triggers, retention policy → `db/schema.sql`.
 - Sources per user / cold-start → `config/sources.yaml` and `config/seeds.yaml`.

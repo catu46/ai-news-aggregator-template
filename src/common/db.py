@@ -175,6 +175,29 @@ class Database:
                 *params,
             )
 
+    async def delivered_embeddings(
+        self, user_id: int, since_days: int = 90, limit: int = 800
+    ) -> list:
+        """Embeddings of posts ALREADY DELIVERED to this user (for repeated-news
+        dedup — the same story from another source/day, different source_id).
+
+        Only the last `since_days` days (the "already received" window) and at
+        most `limit`. Returns the list of embeddings (normalized vectors).
+        """
+        async with self.pool.acquire() as c:
+            rows = await c.fetch(
+                """
+                SELECT p.embedding
+                FROM deliveries d JOIN posts p ON p.id = d.post_id
+                WHERE d.user_id = $1 AND p.embedding IS NOT NULL
+                  AND d.delivered_at > now() - ($2 || ' days')::interval
+                ORDER BY d.delivered_at DESC
+                LIMIT $3
+                """,
+                user_id, str(since_days), limit,
+            )
+        return [r["embedding"] for r in rows]
+
     # ------------------------------------------------------------ deliveries
     async def record_delivery(
         self, user_id: int, post_id: int,
@@ -305,12 +328,14 @@ class Database:
 
     # ----------------------------------------------------------------- focus
     async def set_focus(
-        self, user_id: int, bucket: str, topic: str, embedding, days: int
+        self, user_id: int, bucket: str, topic: str, embedding, days: int,
+        quota: int | None = None,
     ) -> None:
         """Sets the active direction of a bucket (replaces the previous one for that bucket).
 
         One direction per (user, bucket) at a time: re-steering swaps the topic.
-        `days` sets the validity (expires_at = now() + days).
+        `days` sets the validity (expires_at = now() + days). `quota` = how many
+        bucket slots this focus occupies (None = app default: half the cap).
         """
         async with self.pool.acquire() as c:
             async with c.transaction():
@@ -320,10 +345,10 @@ class Database:
                 )
                 await c.execute(
                     """
-                    INSERT INTO focus (user_id, bucket, topic, embedding, expires_at)
-                    VALUES ($1, $2, $3, $4, now() + ($5 || ' days')::interval)
+                    INSERT INTO focus (user_id, bucket, topic, embedding, quota, expires_at)
+                    VALUES ($1, $2, $3, $4, $5, now() + ($6 || ' days')::interval)
                     """,
-                    user_id, bucket, topic, embedding, str(days),
+                    user_id, bucket, topic, embedding, quota, str(days),
                 )
 
     async def active_focus(self, user_id: int, bucket: str) -> list[asyncpg.Record]:
@@ -331,7 +356,7 @@ class Database:
         async with self.pool.acquire() as c:
             return await c.fetch(
                 """
-                SELECT topic, embedding, weight, expires_at
+                SELECT topic, embedding, weight, quota, expires_at
                 FROM focus
                 WHERE user_id = $1 AND bucket = $2
                   AND (expires_at IS NULL OR expires_at > now())
@@ -478,6 +503,32 @@ class Database:
                     "UPDATE users SET settings = settings - 'balance' WHERE id = $1",
                     user_id,
                 )
+
+    # ----------------------------------------------------------- digest size
+    async def get_digest_size(self, user_id: int, bucket: str) -> int | None:
+        """Desired per-day card cap for this bucket (None = app default)."""
+        async with self.pool.acquire() as c:
+            row = await c.fetchrow(
+                "SELECT (settings #>> ARRAY['digest_size', $2])::int AS n "
+                "FROM users WHERE id = $1",
+                user_id, bucket,
+            )
+        return None if row is None or row["n"] is None else int(row["n"])
+
+    async def set_digest_size(self, user_id: int, bucket: str, count: int) -> None:
+        """Writes the bucket's per-day card cap to users.settings->digest_size->bucket."""
+        async with self.pool.acquire() as c:
+            await c.execute(
+                """
+                UPDATE users
+                SET settings = jsonb_set(
+                    CASE WHEN settings ? 'digest_size' THEN settings
+                         ELSE settings || '{"digest_size":{}}'::jsonb END,
+                    ARRAY['digest_size', $2], to_jsonb($3::int), true)
+                WHERE id = $1
+                """,
+                user_id, bucket, int(count),
+            )
 
     async def balance_signal(
         self, user_id: int, platforms: list[str]

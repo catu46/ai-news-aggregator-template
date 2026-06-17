@@ -13,8 +13,10 @@ A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitH
 - **🧠 Curation via Claude Haiku 4.5.** Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to keep it cheap. The **card summary comes out in PT-BR**. The active `/focus` topics enter curation as *interests*, **loosening the bar** for on-topic content. A `SpendGuard` gracefully pauses curation when the monthly spend cap is reached. The **curator provider is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`).
 - **👍 / 👎 with PER-BUCKET affinity.** Your votes train the ranking, and affinity is **separated per bucket**: what you like in repos doesn't interfere with what shows up in news. Affinity only **ranks**, it never hides.
 - **🎯 `/focus` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — broadening the search on **X** (Latest + Top), on **Reddit** (top of the day/week/month + hot), and on **GitHub**. And more: the **curator now listens to the focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
-- **🔎 Conversational recall & `/search`.** Chat recall distinguishes **the polarity of your question**: if you ask about what you **voted** on ("did I like something about XPTO?"), the bot searches your 👍/👎 (`recall_voted`); but a **general** question ("any news about XPTO?") searches the **whole archive** (`search_pool`) — anything good that passed curation, whether you voted on it or not, with ❤️ marking what you liked. `/search` does semantic search on the curated archive and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — so you can ask in PT-BR.
-- **🚧 Relevance floor in search.** Semantic search has a **relevance floor** (`_RELEVANCE_MAX_DIST`): an off-topic result (high cosine distance) is **discarded** instead of being returned as a "less-distant neighbor." If nothing passes the floor, the bot replies **"I found nothing about X"** — it doesn't fill the screen with off-topic items. This applies to both `search_pool` and `recall_voted`.
+- **🔎 Conversational recall & `/search`.** Chat recall distinguishes **the polarity of your question**: if you ask about what you **voted** on ("did I like something about XPTO?"), the bot searches your 👍/👎; but a **general** question ("any news about XPTO?") searches the **whole archive** — anything good that passed curation, whether you voted on it or not, with ❤️ marking what you liked. `/search` does semantic search and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — so you can ask in PT-BR.
+- **🎯 Two-stage search (relevance rerank).** In a single-domain archive (all AI), cosine distance alone can't separate relevant from irrelevant. So search has **two stages** (`semantic_recall`): broad vector recall → a **reranker** (Voyage `rerank-2.5`) that reads query+text together and gives the real relevance score. Off-topic is **discarded**; if nothing passes, the bot says **"I found nothing about X"** instead of filling the screen with off-topic. Applies to chat, `/search` and MCP.
+- **♻️ No repeated news.** The bot won't send you the **same story twice** — even from another source or on another day (and even if you liked it). Before delivering, it runs **semantic dedup** (`_dedup_pending`) against everything already delivered; distinct stories still come through. Repos **and** news.
+- **🎚️ Focus quota + digest size.** A `/focus` is a **dial, not a switch**: it occupies up to **N** of the bucket's slots ("up to 6 VC news"), the rest stays normal — so one topic never starves a platform. If you don't give a number, the bot **asks** "how many?". And you can **resize the digest** by speech ("up to 20 news a day").
 - **⚖️ New × relevant rebalancing.** Adjust by speech how much of the digest is **freshness** (newer) vs **relevance** (affinity + focus) — and, beyond the manual adjustment, the bot **auto-balances** by learning from your votes (it raises novelty if you like what's discovered by the freshness slot, lowers it if you reject). It's saved in your settings. Say **"undo that" / "reset"** and the bot **zeroes out the adjustment** for that bucket (or both) and the mix returns to default. **`/mix`** shows the current new×relevant balance of each bucket (marked `default` or `adjusted`).
 - **🔌 MCP server.** Plug your curated archive into Claude Code/Desktop and query it with `search_archive`, `recall_votes`, and `see_focus`.
 - **🔗 Pasted link = 👍.** Paste a URL in the chat: the bot reads the content via Jina Reader and saves it to your archive already as `origin='manual'` with a positive vote.
@@ -78,10 +80,10 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
    (ranks, per bucket)    (ingest + curate + rank)  (new×relevant, learns from votes)
             └───────────────────────┼───────────────────────┘
                                     ▼
-                 RECALL / MCP  →  search_pool · recall_voted · active_focus
+                 RECALL / MCP  →  semantic_recall (broad vector recall → RERANK) · active_focus
                     (/search, chat, and the MCP server use the SAME methods)
-              ▸ GENERAL question → whole archive (search_pool); "liked X?" → votes
-              ▸ RELEVANCE FLOOR: off-topic is discarded → "I found nothing about X"
+              ▸ GENERAL question → whole archive; "liked X?" → votes
+              ▸ RERANK relevance cut: off-topic is discarded → "I found nothing about X"
 
                        ▸ EVERYTHING scoped by user_id ◂
 ```
@@ -97,11 +99,12 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
 | **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free mode via cookies): `user-posts` and `search`, both `--json`. `/focus` (news) topics broaden the search (Latest + Top). |
 | **Source interface** | `src/ingestion/base.py` | `IngestionSource` ABC: every source implements `async fetch() -> list[IngestedPost]`. Dedup is the database's job. |
 | **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, PT-BR summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
-| **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/status/other) via Haiku. `steer` → directives for `/focus`; `recall` → search (polarity `any` falls back to the whole archive, `liked`/`disliked` to votes); `balance` → new×relevant mix (with `balance_reset` to return to default); `status` → QUERIES the state (focus/mix) by chat, without changing anything. |
+| **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/status/capacity/other) via Haiku. `steer` → directives for `/focus` (with an optional `quota`); `recall` → search (polarity `any` falls back to the whole archive, `liked`/`disliked` to votes); `balance` → new×relevant mix (`balance_reset` to default); `status` → QUERIES the state (focus/mix); `capacity` → resizes a bucket's per-day cap. |
 | **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml`, and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. |
 | **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. |
 | **Data models** | `src/common/models.py` | `IngestedPost` + Pydantic schemas for the Structured Outputs (`Verdict`, `FocusItem`, `ChatIntent`). |
-| **Embedder (Voyage)** | `src/common/embeddings.py` | Voyage AI wrapper (`voyage-4-lite`, 1024-dim, L2-normalized → cosine=dot). |
+| **Embedder + reranker (Voyage)** | `src/common/embeddings.py` | Voyage AI wrapper: embeddings (`voyage-4-lite`, 1024-dim, L2-normalized → cosine=dot) + reranker (`rerank-2.5`, `RERANK_MODEL`) for the search's 2nd stage. |
+| **Two-stage search** | `src/common/recall.py` | `semantic_recall`: broad vector recall → rerank (cut by `RERANK_MIN_SCORE`). Used by `/search`, chat and MCP. |
 | **MCP server** | `src/mcp_server/server.py` | FastMCP (stdio) that exposes the archive to Claude: `search_archive`, `recall_votes`, `see_focus`. |
 | **SQL schema** | `db/schema.sql` | Postgres 15+/pgvector DDL: `users`, `posts` (shared pool), `deliveries`, `votes`, `focus`. HNSW index, `updated_at` triggers. |
 | **config/sources.yaml** | `config/sources.yaml` | Sources per user (multi-tenant). The bot's allowlist is derived from here. |
@@ -309,8 +312,8 @@ After `claude mcp add archive`, Claude starts seeing your curated archive throug
 
 | Tool | What it does |
 | --- | --- |
-| `search_archive` | Semantic search in the pool of curated posts (`search_pool`). |
-| `recall_votes` | Recall in your 👍/👎 — "what have I already liked about X?" (`recall_voted`). |
+| `search_archive` | Semantic search (2 stages: vector → rerank) over the pool of curated posts. |
+| `recall_votes` | Recall in your 👍/👎 — "what have I already liked about X?" (same 2-stage search). |
 | `see_focus` | Shows the active `/focus` per bucket (`active_focus`). |
 
 These are the **same methods** that `/search` and chat (recall) use on Telegram — just now inside Claude.
@@ -331,12 +334,13 @@ src/
     x_source.py           # twitter-cli via cookies (Latest + Top of focus)
   curation/
     curator.py            # swappable curator (CURATOR_PROVIDER) + SpendGuard (Verdict, PT-BR summary)
-    steering.py           # chat → ChatIntent (steer/recall/balance/status, w/ reset) + translate_to_en for /search
+    steering.py           # chat → ChatIntent (steer/recall/balance/status/capacity) + translate_to_en for /search
   common/
     config.py             # .env + sources.yaml + seeds.yaml
     db.py                 # asyncpg + pgvector (scoped by user_id)
     models.py             # IngestedPost + Pydantic schemas
-    embeddings.py         # Voyage voyage-4-lite
+    embeddings.py         # Voyage voyage-4-lite + reranker rerank-2.5
+    recall.py             # 2-stage search: vector recall -> rerank
   mcp_server/server.py    # FastMCP (search_archive / recall_votes / see_focus)
 db/schema.sql             # Postgres 15+/pgvector DDL
 db/reset.sql              # drops the schema's tables (ERASES data)
