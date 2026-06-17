@@ -75,7 +75,7 @@ Prerequisites: `python -m venv .venv && source .venv/bin/activate && pip install
 - **Database:** apply `db/schema.sql` on Supabase — `psql "$DATABASE_URL" -f db/schema.sql` (or paste it into the SQL Editor). Use the **POOLED** connection string.
 - **Cold-start (optional):** `python -m src.seed` — loads examples from `config/seeds.yaml` as preloaded votes (they don't go through the curator).
 - **Pipeline alone:** `python -m src.pipeline` — runs 1 ingest→embed→curate cycle, without delivering to Telegram. Good for testing ingestion.
-- **Full bot:** `python -m src.bot.bot` — brings up the bot in long-polling with the 2 embedded jobs: daily delivery at `DIGEST_HOUR` (timezone `DIGEST_TZ`) and a pipeline every 30 min. It's the `startCommand` in `Procfile`/`railway.json`. Chat commands: `/start`, `/feed` (on-demand delivery), `/run` (full cycle ingest→embed→curate→deliver on the spot), `/search <query>`, `/focus` (view/clear/steer), `/mix` (view the new×relevant balance of each bucket); free text steers the feed, adjusts the mix, or does recall (a general question searches the whole archive; "volta atrás" resets the mix to default), and pasting a link saves it to the archive.
+- **Full bot:** `python -m src.bot.bot` — brings up the bot in long-polling with the 2 embedded jobs: daily delivery at `DIGEST_HOUR` (timezone `DIGEST_TZ`) and a pipeline every 30 min. It's the `startCommand` in `Procfile`/`railway.json`. Chat commands: `/start`, `/feed` (on-demand delivery), `/run` (full cycle ingest→embed→curate→deliver on the spot), `/search <query>`, `/focus` (view/clear/steer), `/mix` (view the new×relevant balance of each bucket); free text steers the feed, adjusts the mix, does recall (a general question searches the whole archive), or queries the state ("what's in focus?", "what's the mix?"); "undo that" resets the mix to default, and pasting a link saves it to the archive.
 - **MCP in Claude:** `claude mcp add archive -- .venv/bin/python -m src.mcp_server.server` (matches `.mcp.json`); to run it directly in stdio: `python -m src.mcp_server.server`.
 
 ## "I want to touch X → file Y"
@@ -83,12 +83,12 @@ Prerequisites: `python -m venv .venv && source .venv/bin/activate && pip install
 - Add/adjust an ingestion source → `src/ingestion/` (`reddit_source.py`, `github_source.py`, `x_source.py`); the contract is `src/ingestion/base.py` (`IngestionSource.fetch()`).
 - Cycle orchestration (ingest/embed/curate order, batches) and how /focus injects topics into ingestion (Reddit+X for news, GitHub for repos) and into the curator's `interests` → `src/pipeline.py`.
 - Swap the curator (Anthropic/Kimi) or adjust the quality rubric/budget → `src/curation/curator.py` (`make_curator`, `AnthropicCurator`, `KimiCurator`, `SpendGuard`, `BudgetExceeded`); the prompt is in `src/curation/prompt.py`.
-- How free chat becomes intent (steer/recall/balance) → `src/curation/steering.py`.
+- How free chat becomes intent (steer/recall/balance/status) → `src/curation/steering.py`.
 - Swap the embeddings model → `src/common/embeddings.py`.
 - SQL queries, database access, recall/affinity methods → `src/common/db.py`.
 - Data schemas (`IngestedPost`, `Verdict`, `FocusItem`, `ChatIntent`) → `src/common/models.py`.
 - Environment variables and YAML parsing → `src/common/config.py` (and the templates in `.env.example`, `config/*.example.yaml`).
-- Telegram commands (`/start`, `/feed`, `/run`, `/search`, `/focus`, `/mix`), card formatting, votes, 2-bucket delivery ranking, freshness cutoff (30d), auto-balancing, chat recall (a general question searches the archive via `search_pool`; "volta atrás" resets the mix), digest time (`DIGEST_HOUR`) and the two jobs → `src/bot/bot.py`.
+- Telegram commands (`/start`, `/feed`, `/run`, `/search`, `/focus`, `/mix`), card formatting, votes, 2-bucket delivery ranking, freshness cutoff (30d), auto-balancing, chat recall (a general question searches the archive via `search_pool`; "undo that" resets the mix), chat state queries (`_do_status`: "what's in focus?"/"what's the mix?"), digest time (`DIGEST_HOUR`) and the two jobs → `src/bot/bot.py`.
 - Tools exposed to Claude (`search_archive`, `recall_votes`, `see_focus`) → `src/mcp_server/server.py`.
 - Tables, indexes (HNSW), triggers, retention policy → `db/schema.sql`.
 - Sources per user / cold-start → `config/sources.yaml` and `config/seeds.yaml`.

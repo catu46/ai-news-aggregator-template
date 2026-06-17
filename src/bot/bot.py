@@ -445,8 +445,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /search <query> — semantic search over your archive (❤️ = liked)\n"
         "• /focus — view/clear the feed's current direction\n"
         "• /mix — view the current new×relevant balance\n"
-        "• just talk to me — steer (“for 3 days I want repos about RAG”) "
-        "or ask (“what was that news about agents that I liked?”)\n"
+        "• just talk to me — steer (“for 3 days I want repos about RAG”), "
+        "ask (“what was that news about agents that I liked?”) "
+        "or query the state (“what's in focus?”, “what's the mix?”)\n"
         "• paste a link — I'll read the page and save it to your archive\n\n"
         "Use 👍/👎 on the cards: each bucket learns your taste separately."
     )
@@ -540,6 +541,45 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def _render_focus(db, user_id: int) -> str:
+    """Text of the active focus per bucket (or a notice that there is none). Shared
+    by the /focus command and the spoken state query (kind="status")."""
+    lines = ["🎯 Active focus:"]
+    any_focus = False
+    for bucket_key, lbl in (("repos", "📦 repos"), ("news", "🗞️ news")):
+        for r in await db.active_focus(user_id, bucket_key):
+            any_focus = True
+            lines.append(f"• {lbl} → {r['topic']}")
+    if not any_focus:
+        return "No active focus. Tell me something like “for 3 days I want repos about RAG”."
+    lines.append("\n/focus clear to clear it.")
+    return "\n".join(lines)
+
+
+async def _render_mixture(db, user_id: int) -> str:
+    """Text of the current new×relevant mix per bucket. Shared by the /mix command
+    and the spoken state query (kind="status")."""
+    label = {"repos": "📦 repos", "news": "🗞️ news"}
+    lines = ["⚖️ Current mix (novelty / relevance):"]
+    for bucket_key in ("repos", "news"):
+        frac = await db.get_balance(user_id, bucket_key)
+        if frac is None:  # no saved adjustment -> bucket's default reserve
+            f = FRESH_SLOTS.get(bucket_key, 0) / max(1, _BUCKET_CAP.get(bucket_key, 1))
+            tag = "default"
+        else:
+            f = float(frac)
+            tag = "adjusted"
+        pct = round(f * 100)
+        lines.append(
+            f"• {label[bucket_key]}: ~{pct}% novelty / {100 - pct}% relevance ({tag})"
+        )
+    lines.append(
+        "\nThe bot auto-adjusts from your votes (starting at ~6 votes in the bucket). "
+        "To change it by hand: just say it (e.g. “more novelty in the news”). To reset: “undo that”."
+    )
+    return "\n".join(lines)
+
+
 async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/focus — shows the active focus. /focus clear — clears it. /focus <text> — steers."""
     user = update.effective_user
@@ -560,19 +600,7 @@ async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # No argument: show what's active.
-    lines = ["🎯 Active focus:"]
-    any_focus = False
-    for bucket_key, lbl in (("repos", "📦 repos"), ("news", "🗞️ news")):
-        for r in await db.active_focus(user_id, bucket_key):
-            any_focus = True
-            lines.append(f"• {lbl} → {r['topic']}")
-    if not any_focus:
-        await update.effective_message.reply_text(
-            "No active focus. Tell me something like “for 3 days I want repos about RAG”."
-        )
-        return
-    lines.append("\n/focus clear to clear it.")
-    await update.effective_message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text(await _render_focus(db, user_id))
 
 
 async def cmd_mix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -582,25 +610,7 @@ async def cmd_mix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_id = await _resolve_user_id(context, user.id)
     db = _db(context)
-    label = {"repos": "📦 repos", "news": "🗞️ news"}
-    lines = ["⚖️ Current mix (novelty / relevance):"]
-    for bucket_key in ("repos", "news"):
-        frac = await db.get_balance(user_id, bucket_key)
-        if frac is None:  # no saved adjustment -> bucket's default reserve
-            f = FRESH_SLOTS.get(bucket_key, 0) / max(1, _BUCKET_CAP.get(bucket_key, 1))
-            tag = "default"
-        else:
-            f = float(frac)
-            tag = "adjusted"
-        pct = round(f * 100)
-        lines.append(
-            f"• {label[bucket_key]}: ~{pct}% novelty / {100 - pct}% relevance ({tag})"
-        )
-    lines.append(
-        "\nThe bot auto-adjusts from your votes (starting at ~6 votes in the bucket). "
-        "To change it by hand: just say it (e.g. “more novelty in the news”). To reset: “undo that”."
-    )
-    await update.effective_message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text(await _render_mixture(db, user_id))
 
 
 # --------------------------------------------------------------------------
@@ -644,6 +654,8 @@ _CHAT_HINT = (
     "about AI regulation”\n"
     "• recall what you voted on — e.g.: “what was that news about agents "
     "that I liked?”\n"
+    "• query the feed's state — e.g.: “what's in focus?”, “what's the mix "
+    "now?”, “how's my feed?”\n"
     "• or paste a link for me to save to the archive."
 )
 
@@ -669,7 +681,27 @@ async def _handle_chat(
     if intent.kind == "steer" and intent.directives:
         await _apply_focus(update, context, intent.directives)
         return
+    if intent.kind == "status":
+        await _do_status(update, context, intent.status_about)
+        return
     await update.effective_message.reply_text(intent.reply or _CHAT_HINT)
+
+
+async def _do_status(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, about: str
+) -> None:
+    """Answers "what's in focus? / what's the mix?" by reading the REAL feed state
+    (focus table + settings->balance), without changing anything."""
+    user_id = await _resolve_user_id(context, update.effective_user.id)
+    db = _db(context)
+    parts = []
+    if about in ("focus", "both"):
+        parts.append(await _render_focus(db, user_id))
+    if about in ("balance", "both"):
+        parts.append(await _render_mixture(db, user_id))
+    if not parts:  # defensive fallback if an unexpected value comes in
+        parts.append(await _render_focus(db, user_id))
+    await update.effective_message.reply_text("\n\n".join(parts))
 
 
 async def _apply_focus(

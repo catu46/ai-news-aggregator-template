@@ -67,19 +67,21 @@ class FocusItem(BaseModel):
     days: int                         # validity in days (0 = use app default)
 
 
-ChatKind = Literal["steer", "recall", "balance", "other"]
+ChatKind = Literal["steer", "recall", "balance", "status", "other"]
 RecallPolarity = Literal["liked", "disliked", "any"]
 BalanceBucket = Literal["repos", "news", "both"]
+StatusAbout = Literal["focus", "balance", "both"]
 
 
 class ChatIntent(BaseModel):
-    """Intent of a chat message: steer / recall / rebalance / other."""
+    """Intent of a chat message: steer / recall / rebalance / query state / other."""
 
-    kind: ChatKind                    # steer | recall | balance | other
+    kind: ChatKind                    # steer | recall | balance | status | other
     directives: list[FocusItem]       # when kind="steer"
     recall_query: str                 # when kind="recall" (topic; "" otherwise)
     recall_polarity: RecallPolarity   # liked | disliked | any
     balance_bucket: BalanceBucket     # when kind="balance"
     balance_fresh: float              # 0..1: desired fraction of NEW content
     balance_reset: bool               # kind="balance": reset the mix to DEFAULT
+    status_about: StatusAbout         # kind="status": focus | balance | both
     reply: str                        # short confirmation/guidance in PT-BR

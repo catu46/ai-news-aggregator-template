@@ -114,7 +114,7 @@ with a monthly spend ceiling. The instruction "personas" are written in English
     only runs when the owner sends text WITHOUT a link. It never takes down the
     handler: it catches exceptions and returns `None` on failure/refusal/empty
     message.
-  - The four intents (`kind` in `ChatIntent`):
+  - The five intents (`kind` in `ChatIntent`):
     - `"steer"` -> steer the feed for a while; fills `directives` (by bucket
       `repos`/`news`, a `topic` good for search in English, and `days`).
     - `"recall"` -> FIND archive content on a topic; fills
@@ -140,19 +140,27 @@ with a monthly spend ceiling. The instruction "personas" are written in English
       is invented — the app clears the adjustment and returns to the default.
       `balance_fresh` maps the wording ("only fresh"≈0.9, "more fresh"≈0.6,
       "half-and-half"=0.5, "more relevant"≈0.25, "only the relevant"≈0.1).
+    - `"status"` -> QUERY the current state of the feed, without changing anything
+      ("what's in focus?", "which topics are active?", "how's my feed?", "what's
+      the mix now?"); fills `status_about` (`focus` = direction/focus only,
+      `balance` = the new×relevant mix only, `both` = a general question about the
+      feed). Do NOT confuse with `steer` (which CHANGES the focus) nor `recall`
+      (which searches CONTENT). The bot replies by reading the REAL state (the
+      `focus` table + `settings->balance`).
     - `"other"` -> small talk, a question, a thank-you.
   - `reply` in `ChatIntent` is always in English and short: on `steer` it
     confirms what it understood; on `recall` it says it'll look it up; on
-    `balance` it confirms the new mix; on `other` it gives one line of guidance.
+    `balance` it confirms the new mix; on `status` it stays empty/short (the app
+    shows the real focus/mix); on `other` it gives one line of guidance.
     It **never** claims to have EXECUTED an action the model doesn't control — on
     `other` it ONLY guides/clarifies: it is FORBIDDEN to say "done", "reverted",
     "reset", "undone", "cancelled" (the app does the executing, not the model) —
     no false confirmations. A request to undo/reset the mix is `balance` (with
     `balance_reset=true`), not `other`. Unused fields stay at their defaults
     (`directives=[]`, `recall_query=""`, `recall_polarity="any"`,
-    `balance_bucket="both"`, `balance_fresh=0.4`, `balance_reset=false`).
-    Timeframe hygiene: `days <= 0` becomes `DEFAULT_FOCUS_DAYS` (14) and is capped
-    at `MAX_FOCUS_DAYS` (60).
+    `balance_bucket="both"`, `balance_fresh=0.4`, `balance_reset=false`,
+    `status_about="both"`). Timeframe hygiene: `days <= 0` becomes
+    `DEFAULT_FOCUS_DAYS` (14) and is capped at `MAX_FOCUS_DAYS` (60).
   - `Steerer.translate_to_en(text) -> str`: translates a short search query to
     English (the language the archive is embedded in) BEFORE embedding, which
     improves recall. It uses `messages.create` (not Structured Outputs) with the

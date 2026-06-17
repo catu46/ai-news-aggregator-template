@@ -1,6 +1,6 @@
 """Classifies a chat message from the feed's owner into an intent (ChatIntent).
 
-Four possible intents:
+Five possible intents:
   - "steer"   -> steer the feed for a while ("for 2 days I want repos about
                  skills and news about AI finance").
   - "recall"  -> recall something HE ALREADY received and voted on ("what was
@@ -8,6 +8,8 @@ Four possible intents:
                  disliked, which one was it?").
   - "balance" -> change the feed's fresh×relevant mix ("send me more new stuff",
                  "focus on what's relevant to me").
+  - "status"  -> QUERY the current state of the feed, without changing anything
+                 ("what's in focus?", "what's the mix now?", "how's my feed?").
   - "other"   -> anything else.
 
 Same model family as the curator (Haiku 4.5) via Structured Outputs. It's cheap
@@ -30,7 +32,7 @@ DEFAULT_FOCUS_DAYS = 14
 MAX_FOCUS_DAYS = 60
 
 _SYSTEM = """You interpret messages from the owner of a personal AI feed and
-classify their intent into ONE of four.
+classify their intent into ONE of five.
 
 The feed delivers TWO buckets per day:
 - "repos": trending GitHub repositories.
@@ -73,10 +75,20 @@ On each card they tap 👍 or 👎.
        clears the adjustment and returns to the default. Otherwise, false. (No
        named bucket -> "both".)
 
-4) kind = "other" — small talk, a question about the bot, a thank-you, etc.
+4) kind = "status" — they want to KNOW the current state of the feed, without
+   changing anything. E.g.: "what's in focus?", "which topics are active now?",
+   "how's my feed?", "what's the fresh×relevant mix?", "am I getting more fresh
+   or more relevant?". Do NOT confuse with "steer" (which CHANGES the focus) nor
+   with "recall" (which searches the archive for CONTENT about a topic). Fill:
+     - status_about: "focus" if they ask only about the DIRECTION/focus ("what's
+       in focus?"); "balance" if only about the fresh×relevant MIX ("what's the
+       mix?"); "both" for a general question about the feed ("how's my feed?").
+
+5) kind = "other" — small talk, a question about the bot, a thank-you, etc.
 
 `reply`: ALWAYS in English, short. On "steer" confirm what you understood; on
-"recall" say you'll look it up; on "balance" confirm the new mix; on "other"
+"recall" say you'll look it up; on "balance" confirm the new mix; on "status"
+leave it empty or very short (the app shows the real focus/mix); on "other"
 give one line of guidance. NEVER claim to have EXECUTED an action you don't
 control — on "other" you ONLY guide/clarify: don't say "done", "reverted",
 "reset", "undone", "cancelled" (the app does the executing, not you). If it's a
@@ -85,7 +97,7 @@ request to undo/reset the mix, it's "balance" (with balance_reset=true), not
 
 Unused fields stay with: directives=[], recall_query="",
 recall_polarity="any", balance_bucket="both", balance_fresh=0.4,
-balance_reset=false."""
+balance_reset=false, status_about="both"."""
 
 
 class Steerer:
