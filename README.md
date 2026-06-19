@@ -12,7 +12,7 @@ A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitH
 
 - **📦 / 🗞️ Morning digest 1x/day.** The digest arrives **once a day, at a fixed time** (`DIGEST_HOUR`/`DIGEST_TZ`, via `run_daily`) — a little morning "newspaper," not an "every-24h" blast. It comes split into **repos** (GitHub) and **news** (Reddit + X), each ranked within itself — no mixing apples and oranges. Delivery only includes posts published in the last **30 days** (`DELIVERY_MAX_AGE_DAYS`).
 - **🏃 `/run` on demand.** Runs a **full cycle now** — ingest → embed → curate → deliver — without waiting for the digest time. It has a lock so two cycles don't run at once.
-- **🧠 Curation via Claude Haiku 4.5.** Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to keep it cheap. The **card summary comes out in PT-BR**. The active `/focus` topics enter curation as *interests*, **loosening the bar** for on-topic content. A `SpendGuard` gracefully pauses curation when the monthly spend cap is reached. The **curator provider is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`).
+- **🧠 Curation via Claude Haiku 4.5.** Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to keep it cheap. The **card summary comes out in English**. The active `/focus` topics enter curation as *interests*, **loosening the bar** for on-topic content. A `SpendGuard` gracefully pauses curation when the monthly spend cap is reached. The **curator provider is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`).
 - **👍 / 👎 with PER-BUCKET affinity.** Your votes train the ranking, and affinity is **separated per bucket**: what you like in repos doesn't interfere with what shows up in news. Affinity only **ranks**, it never hides.
 - **🎯 `/focus` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — broadening the search on **X** (Latest + Top), on **Reddit** (top of the day/week/month + hot), and on **GitHub**. And more: the **curator now listens to the focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
 - **🔎 Conversational recall & `/search`.** Chat recall distinguishes **the polarity of your question**: if you ask about what you **voted** on ("did I like something about XPTO?"), the bot searches your 👍/👎; but a **general** question ("any news about XPTO?") searches the **whole archive** — anything good that passed curation, whether you voted on it or not, with ❤️ marking what you liked. `/search` does semantic search and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — so you can ask in PT-BR.
@@ -62,7 +62,7 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
                                     │
                   ┌─────────────────┼─────────────────┐
                   ▼                                   ▼
-        EMBED (Voyage voyage-4-lite)       CURATE (curator → Verdict, PT-BR summary)
+        EMBED (Voyage voyage-4-lite)       CURATE (curator → Verdict, English summary)
         embedding IS NULL, batches of 100  verdict IS NULL, batches of 100
                   │                        ▲ LISTENS to /focus (interests loosen the bar)
                   └─────────────────┬─────────────────┘  SpendGuard pauses $$
@@ -100,7 +100,7 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
 | **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/focus` (repos) topics enter as extra queries. `GITHUB_TOKEN` optional. |
 | **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free mode via cookies): `user-posts` and `search`, both `--json`. `/focus` (news) topics broaden the search (Latest + Top). |
 | **Source interface** | `src/ingestion/base.py` | `IngestionSource` ABC: every source implements `async fetch() -> list[IngestedPost]`. Dedup is the database's job. |
-| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, PT-BR summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
+| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, English summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
 | **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/status/capacity/other) via Haiku. `steer` → directives for `/focus` (with an optional `quota`); `recall` → search (polarity `any` falls back to the whole archive, `liked`/`disliked` to votes); `balance` → new×relevant mix (`balance_reset` to default); `status` → QUERIES the state (focus/mix); `capacity` → resizes a bucket's per-day cap. |
 | **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml`, and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. |
 | **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. |
@@ -219,7 +219,6 @@ TELEGRAM_USER_ID=
 DIGEST_HOUR=7                 # 0-23, local hour
 DIGEST_TZ=America/Sao_Paulo   # IANA timezone
 DATABASE_URL=
-EXA_API_KEY=
 ```
 
 Also edit `config/seeds.yaml` with your taste examples (`gold` = what you want to receive, `noise` = what should be rejected). They feed the cold-start in step 7 — 3–5 of each is enough.
@@ -335,7 +334,7 @@ src/
     github_source.py      # Search API + README (+ focus queries)
     x_source.py           # twitter-cli via cookies (Latest + Top of focus)
   curation/
-    curator.py            # swappable curator (CURATOR_PROVIDER) + SpendGuard (Verdict, PT-BR summary)
+    curator.py            # swappable curator (CURATOR_PROVIDER) + SpendGuard (Verdict, English summary)
     steering.py           # chat → ChatIntent (steer/recall/balance/status/capacity) + translate_to_en for /search
   common/
     config.py             # .env + sources.yaml + seeds.yaml

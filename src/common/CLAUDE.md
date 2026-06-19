@@ -7,7 +7,7 @@ Flow overview: the sources (Reddit/X/GitHub) produce `IngestedPost` → they lan
 ## File by file
 
 **`config.py` — typed configuration (`.env` + the YAMLs)**
-- `Settings` (frozen dataclass): all the app's keys/secrets and parameters. Required (error if missing): `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DATABASE_URL`. With defaults: `CURATOR_MODEL` (claude-haiku-4-5), `CURATOR_MONTHLY_BUDGET_USD` (8), `EMBEDDING_MODEL` (voyage-4-lite), `REDDIT_USER_AGENT`. Optional (may be None): Twitter tokens (`auth_token`/`ct0`), `EXA_API_KEY`, `GITHUB_TOKEN`.
+- `Settings` (frozen dataclass): all the app's keys/secrets and parameters. Required (error if missing): `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DATABASE_URL`. With defaults: `CURATOR_MODEL` (claude-haiku-4-5), `CURATOR_MONTHLY_BUDGET_USD` (8), `EMBEDDING_MODEL` (voyage-4-lite), `REDDIT_USER_AGENT`. Optional (may be None): Twitter tokens (`auth_token`/`ct0`), `GITHUB_TOKEN`.
 - Curator provider (lets you swap the curation LLM without touching code): `CURATOR_PROVIDER` (`anthropic`, default, or `kimi`); when `kimi`, it uses `MOONSHOT_API_KEY` (optional, may be None), `MOONSHOT_BASE_URL` (default `https://api.moonshot.ai/v1`) and `KIMI_MODEL` (default `kimi-k2.6`). This is what decides which `Curator` implementation the rest of the app instantiates.
 - Daily delivery: `DIGEST_HOUR` (local hour 0–23, default 7) and `DIGEST_TZ` (IANA timezone, default `America/Sao_Paulo`) — they define the time of the digest scheduled by the bot.
 - `load_settings()` reads the `.env` (via `load_dotenv()` at import) and builds the `Settings`. It's the single entry point for configuration — other modules receive this object.

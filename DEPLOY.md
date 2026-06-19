@@ -42,7 +42,6 @@ digest delivery. **No separate cron service needed.**
 | `TWITTER_CT0` | yes* | `ct0` cookie from the same session |
 | `REDDIT_USER_AGENT` | optional | descriptive UA (has a default in `.env.example`) |
 | `GITHUB_TOKEN` | optional | raises the Search API rate limit |
-| `EXA_API_KEY` | optional | boosts the seed's semantic search |
 | `CURATOR_MONTHLY_BUDGET_USD` | optional | spend cap (default `8`); curation pauses when exceeded |
 | `CURATOR_MODEL` | optional | default `claude-haiku-4-5` |
 | `EMBEDDING_MODEL` | optional | default `voyage-4-lite` |

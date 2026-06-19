@@ -25,7 +25,6 @@ The following variables are considered sensitive and follow the rules above
 - `DATABASE_URL` — database connection string (includes credentials).
 - `TWITTER_AUTH_TOKEN` / `CT0` — X/Twitter authentication cookies.
 - `GITHUB_TOKEN` — GitHub access token.
-- `EXA_API_KEY` — optional Exa key (semantic search).
 
 ## Configuration data vs secrets
 

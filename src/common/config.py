@@ -34,7 +34,6 @@ class Settings:
     twitter_ct0: str | None
     telegram_bot_token: str
     database_url: str
-    exa_api_key: str | None
     github_token: str | None
     curator_provider: str          # 'anthropic' (default) | 'kimi'
     moonshot_api_key: str | None    # if curator_provider='kimi'
@@ -60,7 +59,6 @@ def load_settings() -> Settings:
         twitter_ct0=_env("TWITTER_CT0"),
         telegram_bot_token=_env("TELEGRAM_BOT_TOKEN", required=True),
         database_url=_env("DATABASE_URL", required=True),
-        exa_api_key=_env("EXA_API_KEY"),
         github_token=_env("GITHUB_TOKEN"),
         curator_provider=_env("CURATOR_PROVIDER", "anthropic"),
         moonshot_api_key=_env("MOONSHOT_API_KEY"),
