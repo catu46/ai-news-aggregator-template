@@ -4,6 +4,8 @@ A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitH
 
 > **Open-source template.** Each person spins up their own copy: their bot, their database, their data. Nothing is shared between instances.
 
+> **Not just AI.** It ships configured for AI/tech, but the **engine is topic-agnostic**. Point `config/sources.yaml` at any subreddits / X searches you want (World Cup, a niche market, a sports league…), add your own `gold`/`noise` examples to `seeds.yaml`, and rewrite the curator prompt (`src/curation/prompt.py`) to judge **your** topic's quality. Semantic search, dedup, steering and delivery work regardless of domain. *(The 📦 repos bucket is GitHub-specific — drop it or repurpose the source if your topic isn't code.)*
+
 ---
 
 ## ✨ Features
