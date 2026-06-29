@@ -61,6 +61,10 @@ SEARCH_LIMIT = 10
 # Affinity: uses your 👍/👎 ONLY to RANK the feed (👎 sinks, 👍 rises).
 # Nothing is hidden — all approved content ends up delivered, just in order.
 MIN_VOTES_FOR_AFFINITY = 1        # turns ranking on starting from the 1st vote
+# Star bonus in the repos bucket: score += STAR_WEIGHT * log10(stars).
+# e.g. 1k★ -> +0.75, 10k★ -> +1.0, 50k★ -> +1.17 (log scale so a giant doesn't
+# steamroll affinity/focus). Only affects github (the only source with 'stars').
+STAR_WEIGHT = 0.25
 
 # Daily digest in 2 buckets: (header, source platforms, cap per digest).
 REPOS_PER_DIGEST = 5
@@ -415,6 +419,12 @@ async def _deliver_bucket(
             # --- active direction (/focus) ---
             if focuses:
                 score += _focus_boost(emb, focuses)
+        # --- star bonus (repos): a repo with more stars ranks higher ---
+        # (only github has 'stars' in metadata; log10 so a giant doesn't
+        # steamroll everything). Independent of the embedding.
+        stars = (rec["metadata"] or {}).get("stars")
+        if stars:
+            score += STAR_WEIGHT * float(np.log10(max(int(stars), 1)))
         scored.append((rec, score))
 
     scored.sort(key=lambda t: t[1], reverse=True)

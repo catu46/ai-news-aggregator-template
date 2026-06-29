@@ -75,11 +75,14 @@ with a monthly spend ceiling. The instruction "personas" are written in English
 - **`prompt.py`** -> the curator's rubric and the user-message assembly.
   - `RUBRIC`: the static, cacheable system block. It is deliberately long
     (>= 4096 tokens, Haiku's cache floor) — assembled from `_CORE` (the
-    "ruthless curator" persona, the 5 approval categories —
-    `data_engineering`, `automation`, `autonomous_agents`,
-    `advanced_frameworks`, `modern_architecture` — and the rejection reasons:
-    `basic_tutorial`, `corporate_hype`, `clickbait`, `off_topic`, `none`) plus
-    `_EXAMPLES` (16 worked boundary examples). The padding is NOT filler: the
+    "ruthless curator" persona for an **APPLIED-AI** feed — tools/capabilities/
+    techniques/news for someone who USES AI, NOT an ML-research feed; enemy #1 is
+    AI Slop — the 5 approval categories `ai_tools`, `ai_capabilities`,
+    `applied_techniques`, `autonomous_agents`, `ai_industry`, and the rejection
+    reasons `ai_slop`, `low_signal`, `research_only`, `corporate_hype`,
+    `basic_tutorial`, `off_topic`, `none`) plus `_EXAMPLES` (15 worked boundary
+    examples covering applied-AI approves and slop/research_only rejects). The
+    padding is NOT filler: the
     examples calibrate the classifier AND push the prefix above the cache floor.
     Golden rule: nothing dynamic in `RUBRIC` — any byte that changes invalidates
     the cache. The `Verdict`'s `summary` is ALWAYS in English (all other fields

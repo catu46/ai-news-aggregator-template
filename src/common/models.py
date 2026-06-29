@@ -28,18 +28,20 @@ class IngestedPost:
 # Structured Outputs does not support them. Range validation is done in the app.
 # --------------------------------------------------------------------------
 PrimaryCategory = Literal[
-    "data_engineering",
-    "automation",
-    "autonomous_agents",
-    "advanced_frameworks",
-    "modern_architecture",
+    "ai_tools",            # useful AI tools/products/apps/agents/libs you'd adopt
+    "ai_capabilities",     # model/feature releases that change what you can DO
+    "applied_techniques",  # how to USE AI well (agent patterns, RAG, prompting, evals)
+    "autonomous_agents",   # agent architectures/tools/postmortems (applied)
+    "ai_industry",         # AI news/industry that matters to a practitioner
     "other",
 ]
 RejectReason = Literal[
-    "basic_tutorial",
-    "corporate_hype",
-    "clickbait",
-    "off_topic",
+    "ai_slop",             # clickbait/hype/engagement-bait (the #1 enemy)
+    "low_signal",          # generic/rambling/low-info — tech-portal grade
+    "research_only",       # ML/infra research or tinkering with no applicability
+    "corporate_hype",      # vendor/product marketing
+    "basic_tutorial",      # 101 / getting-started / beginner listicle
+    "off_topic",           # not about AI
     "none",
 ]
 

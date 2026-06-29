@@ -54,15 +54,18 @@ Every `fetch()` returns a `list[IngestedPost]`. The relevant fields:
   Constructor takes: `subreddits`, `user_agent`, `limit`, and `searches` (optional). If there
   are neither subs nor searches, `fetch()` returns empty.
 
-- **`github_source.py`** (`GitHubSource`) → Fetches **trending repos by topic** via GitHub's
-  **public Search API**. For each query/topic, it fetches repos *created recently*
-  (`created:>=<date>`) with a minimum number of stars, sorted by stars (a proxy for "a new repo
-  that's already taking off"). For each repo found, it also fetches the **README** as raw text
-  (best-effort, truncated to 5000 chars) — that way the embedding and the curator have real
-  content. **Auth optional but recommended:** without `GITHUB_TOKEN` the README read limit is
-  60 req/h; with a token, 5000/h. One query's failure is isolated (it continues with the others);
-  local dedup by repo id within the same fetch. Constructor: `queries`, `token` (optional), and
-  keyword-only `per_query`, `recent_days`, `min_stars`. Note that `source_platform` is `"github"`.
+- **`github_source.py`** (`GitHubSource`) → Fetches **repos by topic** via GitHub's
+  **public Search API**, in **TWO passes per topic**: (A) **NEW trending** — repos *created
+  recently* (`created:>=<date>`) with `min_stars`, sorted by stars ("a new repo already taking
+  off"); and (B) **ESTABLISHED** — repos with `min_stars_established` (default 200) that are
+  *recently active* (`pushed:>=<date>`), so the big/useful repos show up too, not just newborns.
+  For each repo it also fetches the **README** as raw text (best-effort, truncated to 5000 chars)
+  so the embedding and curator have real content. **Auth optional but recommended:** without
+  `GITHUB_TOKEN` the README read limit is 60 req/h; with a token, 5000/h. One query's failure is
+  isolated; local dedup by repo id within the same fetch (covers the A/B overlap). Constructor:
+  `queries`, `token` (optional), and keyword-only `per_query`, `recent_days`, `min_stars`,
+  `min_stars_established`. Note that `source_platform` is `"github"`. (Delivery also weights repos
+  by star count — see `bot/CLAUDE.md`.)
 
 - **`x_source.py`** (`XSource`) → Collects from **X/Twitter** in free mode (cookie-based),
   calling the external `twitter` CLI (twitter-cli) via **subprocess** (`asyncio.create_subprocess_exec`),

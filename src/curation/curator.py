@@ -288,10 +288,10 @@ EXACTLY these keys:
 {
   "verdict": "approve" or "reject",
   "confidence": a number between 0 and 1,
-  "primary_category": one of "data_engineering", "automation",
-      "autonomous_agents", "advanced_frameworks", "modern_architecture", "other",
-  "reject_reason": one of "basic_tutorial", "corporate_hype", "clickbait",
-      "off_topic", "none",
+  "primary_category": one of "ai_tools", "ai_capabilities",
+      "applied_techniques", "autonomous_agents", "ai_industry", "other",
+  "reject_reason": one of "ai_slop", "low_signal", "research_only",
+      "corporate_hype", "basic_tutorial", "off_topic", "none",
   "summary": a 1-2 sentence summary in English,
   "one_line_rationale": one terse sentence
 }

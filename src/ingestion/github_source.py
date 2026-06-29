@@ -33,12 +33,15 @@ class GitHubSource(IngestionSource):
         per_query: int = 10,
         recent_days: int = 30,
         min_stars: int = 5,
+        min_stars_established: int = 200,
     ) -> None:
         self._queries = [q.strip() for q in queries if q.strip()]
         self._token = token
         self._per_query = per_query
         self._recent_days = recent_days
         self._min_stars = min_stars
+        # star floor for the ESTABLISHED pass (big, actively-maintained repos)
+        self._min_stars_established = min_stars_established
 
     def _headers(self) -> dict[str, str]:
         h = {
@@ -62,27 +65,34 @@ class GitHubSource(IngestionSource):
         seen: set[str] = set()
         async with httpx.AsyncClient(timeout=20.0, headers=self._headers()) as client:
             for query in self._queries:
-                q = f"{query} created:>={since} stars:>={self._min_stars}"
-                params = {
-                    "q": q,
-                    "sort": "stars",
-                    "order": "desc",
-                    "per_page": str(self._per_query),
-                }
-                try:
-                    resp = await client.get(GITHUB_SEARCH_URL, params=params)
-                    resp.raise_for_status()
-                    items = resp.json().get("items", [])
-                except Exception:  # isolate one query's failure; continue with the rest
-                    continue
-
-                for repo in items:
-                    rid = str(repo.get("id") or repo.get("full_name") or "")
-                    if not rid or rid in seen:
+                # Two passes per topic: (A) NEW trending — created recently with
+                # traction; (B) ESTABLISHED — high stars and recently active
+                # (pushed), to bring the big/useful repos, not just newborns.
+                searches = (
+                    f"{query} created:>={since} stars:>={self._min_stars}",
+                    f"{query} stars:>={self._min_stars_established} pushed:>={since}",
+                )
+                for q in searches:
+                    params = {
+                        "q": q,
+                        "sort": "stars",
+                        "order": "desc",
+                        "per_page": str(self._per_query),
+                    }
+                    try:
+                        resp = await client.get(GITHUB_SEARCH_URL, params=params)
+                        resp.raise_for_status()
+                        items = resp.json().get("items", [])
+                    except Exception:  # isolate one query's failure; continue
                         continue
-                    seen.add(rid)
-                    readme = await self._fetch_readme(client, repo.get("full_name"))
-                    posts.append(self._to_post(repo, query, readme))
+
+                    for repo in items:
+                        rid = str(repo.get("id") or repo.get("full_name") or "")
+                        if not rid or rid in seen:
+                            continue
+                        seen.add(rid)
+                        readme = await self._fetch_readme(client, repo.get("full_name"))
+                        posts.append(self._to_post(repo, query, readme))
         return posts
 
     async def _fetch_readme(self, client: httpx.AsyncClient, full_name: str | None) -> str:
