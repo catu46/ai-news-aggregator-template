@@ -32,11 +32,15 @@ from .prompt import RUBRIC, build_user_message
 logger = logging.getLogger("curator")
 
 # Haiku 4.5 pricing (USD per 1M tokens), verified Jun/2026.
-# Tokens read from cache cost ~0.1x of input; here we use a conservative
-# estimate (we charge cache_read at the same price as input). Overestimating
-# the spend is safe: worst case we stop a little before the real budget.
-_PRICE_INPUT_PER_TOKEN = 1.0 / 1_000_000   # $1 / 1M input
+_PRICE_INPUT_PER_TOKEN = 1.0 / 1_000_000   # $1 / 1M input (fresh, uncached)
 _PRICE_OUTPUT_PER_TOKEN = 5.0 / 1_000_000  # $5 / 1M output
+# Prompt caching: a cache READ costs 0.1x of input; a cache WRITE (5-min TTL)
+# costs 1.25x. Estimating with these REAL factors keeps the spend cap aligned
+# with the actual bill — charging cache_read at full input price overestimates
+# ~5x (the big rubric is cached), which makes the SpendGuard PAUSE curation way
+# too early and pile up an uncurated backlog.
+_PRICE_CACHE_READ_PER_TOKEN = 0.10 / 1_000_000   # $0.10 / 1M (0.1x input)
+_PRICE_CACHE_WRITE_PER_TOKEN = 1.25 / 1_000_000  # $1.25 / 1M (1.25x input)
 
 # Default path of the persisted spend file (keyed by YYYY-MM).
 _DEFAULT_SPEND_PATH = Path(
@@ -112,17 +116,23 @@ class SpendGuard:
 def estimate_cost_usd(usage: object) -> float:
     """Approximate USD of a response, from `resp.usage`.
 
-    We charge input + cache_read at the input price (conservative estimate)
-    and output at the output price. `usage` is the SDK object (attributes may
-    be missing depending on the version) — we read defensively.
+    Charges each component at its REAL price: fresh input at 1x, cache_read at
+    0.1x, cache_write at 1.25x, output at 5x. Since the big rubric is cached,
+    most of the input comes back as cache_read (10x cheaper) — estimating that
+    correctly is what keeps the spend cap from pausing curation too early.
+    `usage` is the SDK object (attributes may be missing) — read defensively.
     """
     input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
     cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
     cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
 
-    billable_input = input_tokens + cache_read + cache_write
-    return billable_input * _PRICE_INPUT_PER_TOKEN + output_tokens * _PRICE_OUTPUT_PER_TOKEN
+    return (
+        input_tokens * _PRICE_INPUT_PER_TOKEN
+        + cache_read * _PRICE_CACHE_READ_PER_TOKEN
+        + cache_write * _PRICE_CACHE_WRITE_PER_TOKEN
+        + output_tokens * _PRICE_OUTPUT_PER_TOKEN
+    )
 
 
 # --------------------------------------------------------------------------
