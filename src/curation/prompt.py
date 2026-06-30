@@ -88,12 +88,19 @@ resource, and SLOP is the enemy. Topic variety is welcome; LOW SIGNAL is not.
 =====================================================================
 WHAT TO REJECT  (verdict = "reject")  — pick the best `reject_reason`
 =====================================================================
-- "ai_slop": THE TOP REJECT. Clickbait, hype, and engagement-bait — "🚨", "X is
-  dead", "you're already behind", "nobody talks about", "the ONE trick", "this
-  changes everything", thread-bait ("🧵👇"), grand hot takes ("jobs are becoming
-  less valuable"), emoji-stuffed announcements that drop a number but no real
-  USABLE substance. If the FRAMING is bait, reject as ai_slop even if it
-  name-drops something real.
+- "ai_slop": THE TOP REJECT. Clickbait, hype, engagement-bait, and RUMOR/LEAK
+  speculation with no concrete substance — "🚨", "X is dead", "you're already
+  behind", "the ONE trick", "this changes everything", thread-bait ("🧵👇"),
+  grand hot takes ("jobs are becoming less valuable"), and especially rumor/leak/
+  speculation chatter ("X leaked 👀", "could drop next week", "if X ships
+  tomorrow will you…", "rumor watch is heating up", "spotted in an internal
+  string"). BUT — hype FRAMING alone does NOT make it slop if the post carries a
+  CONCRETE, verifiable fact: real numbers (e.g. "1.55x faster, no price
+  increase", a benchmark score), a NAMED release with actual details/specs, or a
+  real reported event (a launch, a rollout limit, a partnership preview). In that
+  case look PAST the framing and judge it on substance as ai_capabilities or
+  ai_industry. Reject as ai_slop only when, stripped of the hype, there is
+  NOTHING concrete left — pure speculation, opinion, or announcement-fluff.
 - "low_signal": generic, rambling, or obvious content with little information
   density — the kind of AI item any tech-news portal would run, adding no tools
   or possibilities. Long posts that say little; "my thoughts on AI"; vague
@@ -115,8 +122,11 @@ WHAT TO REJECT  (verdict = "reject")  — pick the best `reject_reason`
 Hard rules:
 - If verdict = "approve", reject_reason MUST be "none". If "reject", it MUST NOT
   be "none". primary_category is always required (use "other" if none fits).
-- The SLOP TEST overrides topic: if a post is clickbait/hype/engagement-bait or
-  low-signal, reject it even if the topic is perfect. Bait framing -> ai_slop.
+- The SLOP TEST: reject for bait framing ONLY when nothing concrete is behind it.
+  A hyped post that STILL carries real numbers, a named release with details, or
+  a verifiable event SURVIVES the framing -> approve (ai_capabilities/ai_industry).
+  Pure rumor/leak/speculation/hot-take with nothing verifiable -> ai_slop; a
+  low-signal ramble -> low_signal.
 - Length is not depth — in BOTH directions. A short tweet can be high-signal (a
   real tool, a concrete capability, a usable tip -> approve); a long post can be
   empty (reject). Judge by USEFULNESS and signal density, never by word count.
@@ -395,14 +405,49 @@ WHY: It has numbers, but it is one person's hardware-specific tinkering — no
 tool, no technique a non-tinkerer would reuse. Reject as research_only. (If it
 shipped a tool/flag others could apply, it would flip to ai_tools/applied.)
 
+--- EXAMPLE 16 (hype framing BUT concrete -> approve) ---------------
+POST:
+  "🚨 GPT-5.6 Sol vs GPT-5.5: 1.55x smarter tokens, no price increase, and up to
+  15x faster on the API. OpenAI started rolling it out to trusted partners."
+VERDICT:
+  {"verdict": "approve", "confidence": 0.8,
+   "primary_category": "ai_capabilities", "reject_reason": "none",
+   "summary": "GPT-5.6 'Sol' lands with ~1.55x more 'smart tokens', no price
+   increase, and up to 15x faster on the API than GPT-5.5, rolling out to partners.",
+   "one_line_rationale": "Hyped framing, but real capability numbers and a named
+   release — concrete enough to be useful."}
+WHY: The 🚨 is bait, but underneath there are concrete numbers (1.55x, no price
+increase, 15x faster) and a named release with a real event (partner rollout).
+Look past the framing — this is genuine capability news. Approve as
+ai_capabilities. (Contrast EXAMPLE 7: same 🚨 framing, but NO numbers, NO link,
+nothing concrete -> ai_slop.)
+
+--- EXAMPLE 17 (rumor / speculation -> reject) ---------------------
+POST:
+  "GPT-5.6 rumor watch is heating up 👀 People are saying it could drop next week,
+  maybe ~3x cheaper, and that it beats the competition. If it ships tomorrow, are
+  you switching? 🧵👇"
+VERDICT:
+  {"verdict": "reject", "confidence": 0.92,
+   "primary_category": "other", "reject_reason": "ai_slop",
+   "summary": "Speculation/rumor about a possible GPT-5.6 launch (date, price,
+   performance), with nothing confirmed or verifiable.",
+   "one_line_rationale": "Pure rumor/speculation with a poll hook — nothing
+   verifiable."}
+WHY: All "could / maybe / people are saying / if it ships" — speculation, not a
+fact. Stripped of the hype there is nothing concrete. Reject as ai_slop.
+
 =====================================================================
 CALIBRATION NOTES  (how to set confidence and resolve ties)
 =====================================================================
 - Confidence is about the VERDICT, not the post. A clear slop tweet you are sure
   to reject is high confidence (~0.95+). A genuinely ambiguous borderline post
   is mid confidence (~0.6-0.78) — and ties break toward reject.
-- Run the SLOP TEST first: bait framing (🚨, "X is dead", "changes everything",
-  "🧵👇") or low-information ramble -> reject, even if the topic is perfect.
+- Run the SLOP TEST first, but check for substance: bait framing (🚨, "changes
+  everything", "🧵👇") rejects ONLY if nothing concrete is behind it. Real numbers,
+  a named release with details, or a verifiable event survive the framing and
+  approve (ai_capabilities/ai_industry). Rumor/leak/speculation ("could drop",
+  "leaked", "if X ships") and low-info ramble still reject.
 - The strongest APPROVE signal is "a real, usable thing": a tool with a repo, a
   concrete capability with numbers, a reusable technique, or news that changes
   what you'd do. Its ABSENCE on a hyped claim is the strongest reason to reject.
