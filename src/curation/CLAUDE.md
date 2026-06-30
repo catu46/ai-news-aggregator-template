@@ -54,10 +54,12 @@ with a monthly spend ceiling. The instruction "personas" are written in English
     (tokens were already billed). The runner can check `spent_this_month` and
     `is_over_budget()` before running. It is shared by both providers.
   - `estimate_cost_usd(usage)`: estimates the cost of an Anthropic response from
-    `resp.usage`. It reads the fields defensively and charges input + cache
-    (read and write) at the input price, and output at the output price. It's a
-    **conservative** estimate (overestimating is safe: worst case we stop a
-    little before the budget).
+    `resp.usage`, charging each component at its **REAL** price: fresh input at
+    1x, `cache_read` at **0.1x**, `cache_write` at **1.25x**, output at 5x. Since
+    the big rubric is cached, most of the input comes back as `cache_read` (10x
+    cheaper) — getting that right is what keeps the spend cap from PAUSING
+    curation too early. (The old version charged cache at the full input price,
+    overestimated ~5x, and let an uncurated backlog pile up.)
   - `estimate_kimi_cost_usd(usage)`: the equivalent for Kimi, reading the
     OpenAI-style `usage`. It uses `prompt_tokens_details.cached_tokens` when
     available (charges cache hit cheaper); otherwise, it charges all input at the
