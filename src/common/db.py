@@ -504,6 +504,39 @@ class Database:
                     user_id,
                 )
 
+    # --------------------------------------------- pop/recency weights (learned)
+    async def get_weight_prefs(self, user_id: int, bucket: str) -> tuple[float, float]:
+        """LEARNED popularity and recency multipliers for this bucket (1.0 =
+        neutral / unlearned). Stored in users.settings->weight_pref->bucket->{pop,recency}."""
+        async with self.pool.acquire() as c:
+            row = await c.fetchrow(
+                "SELECT settings #> ARRAY['weight_pref', $2] AS wp "
+                "FROM users WHERE id = $1",
+                user_id, bucket,
+            )
+        wp = row["wp"] if row else None
+        if not wp:
+            return (1.0, 1.0)
+        return (float(wp.get("pop", 1.0)), float(wp.get("recency", 1.0)))
+
+    async def set_weight_prefs(
+        self, user_id: int, bucket: str, pop_mult: float, recency_mult: float
+    ) -> None:
+        """Writes the learned multipliers to users.settings->weight_pref->bucket."""
+        async with self.pool.acquire() as c:
+            await c.execute(
+                """
+                UPDATE users
+                SET settings = jsonb_set(
+                    CASE WHEN settings ? 'weight_pref' THEN settings
+                         ELSE settings || '{"weight_pref":{}}'::jsonb END,
+                    ARRAY['weight_pref', $2],
+                    jsonb_build_object('pop', $3::real, 'recency', $4::real), true)
+                WHERE id = $1
+                """,
+                user_id, bucket, float(pop_mult), float(recency_mult),
+            )
+
     # ----------------------------------------------------------- digest size
     async def get_digest_size(self, user_id: int, bucket: str) -> int | None:
         """Desired per-day card cap for this bucket (None = app default)."""
@@ -547,6 +580,28 @@ class Database:
                 JOIN deliveries d ON d.user_id = v.user_id AND d.post_id = v.post_id
                 JOIN posts p ON p.id = v.post_id
                 WHERE v.user_id = $1 AND p.source_platform = ANY($2)
+                """,
+                user_id, platforms,
+            )
+
+    async def vote_meta_signal(
+        self, user_id: int, platforms: list[str]
+    ) -> list[asyncpg.Record]:
+        """(vote, source_platform, metadata, published_at, voted_at) of the voted
+        posts in this bucket (telegram origin).
+
+        Feeds the learning of the POPULARITY and RECENCY weights: correlates
+        engagement (likes/RTs/stars) and age-at-vote-time with 👍/👎.
+        """
+        async with self.pool.acquire() as c:
+            return await c.fetch(
+                """
+                SELECT v.vote AS vote, p.source_platform, p.metadata,
+                       p.published_at, v.created_at AS voted_at
+                FROM votes v
+                JOIN posts p ON p.id = v.post_id
+                WHERE v.user_id = $1 AND p.source_platform = ANY($2)
+                  AND v.origin = 'telegram'
                 """,
                 user_id, platforms,
             )

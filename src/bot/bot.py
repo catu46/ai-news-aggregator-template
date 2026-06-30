@@ -109,6 +109,21 @@ DEDUP_SINCE_DAYS = 90
 AUTO_BALANCE_MIN_VOTES = 6
 AUTO_BALANCE_STEP = 0.15
 AUTO_BALANCE_BOUNDS = (0.15, 0.60)
+# Learning the POPULARITY/RECENCY weights per user (analogous to auto-balance, but
+# over the score weights). A multiplier on the base weight, learned from votes: if
+# you like popular/recent items more -> the weight rises. SEMANTIC (affinity) stays
+# dominant — so the cap is modest (1.5), letting pop/recency only INFLUENCE.
+WEIGHT_PREF_BOUNDS = (0.5, 1.5)   # min/max multiplier (1.0 = neutral)
+WEIGHT_PREF_GAIN = 0.8            # how much the preference [-1,1] moves the target
+WEIGHT_PREF_STEP = 0.30          # EMA step (gradual)
+WEIGHT_PREF_MIN_VOTES = 6        # minimum signal to learn
+# CAP on the non-semantic term (popularity + recency summed, with learned weights).
+# Guarantees SEMANTIC (affinity) stays dominant: without it, both multipliers at
+# max (1.5 each) would sum to ~3.4-3.8 for a fresh viral and overpower a good
+# on-topic match (affinity ~1.9-2.5). The cap keeps the non-semantic below a strong
+# on-topic affinity — preserving "a big launch rises" without letting the learning
+# steamroll the topic. ⚠️ Re-derive if STAR_WEIGHT/TWEET_POP_WEIGHT/RECENCY_WEIGHT change.
+POP_REC_CAP = 2.5
 # Focus quota (A): how many bucket slots a /focus occupies. If you don't say a
 # number, the default is HALF the cap — focus prioritizes the topic but does NOT
 # monopolize (the remaining slots stay normal: freshness + affinity -> diversity returns).
@@ -269,8 +284,9 @@ async def deliver_pending(app: Application, tune: bool = False) -> int:
             logger.exception("dedup failed (user_id=%s); proceeding without it", user_id)
 
         for bucket_key, header, platforms, _cap in BUCKETS:
-            if tune:  # learns this bucket's new×relevant mix (once a day)
+            if tune:  # learns (once a day) the new×relevant mix and the pop/recency weights
                 await _auto_tune_balance(db, user_id, bucket_key, list(platforms))
+                await _auto_tune_weights(db, user_id, bucket_key, list(platforms))
             recs = [r for r in pending if r["source_platform"] in platforms]
             if recs:
                 cap = await _bucket_cap(db, user_id, bucket_key)  # adjustable cap (B)
@@ -322,6 +338,71 @@ async def _auto_tune_balance(
         logger.info(
             "auto-balance %s: %.2f -> %.2f (target %.2f, %d votes)",
             bucket_key, cur, new, target, len(rows),
+        )
+
+
+def _weight_pref_target(pairs: list[tuple[float, int]]) -> float | None:
+    """Target multiplier (1.0 = neutral) from (signal_value, vote) pairs.
+
+    Measures whether you like items with a HIGH signal (engagement or recency)
+    MORE: split the votes at the signal's median and compare the 👍 rate of the
+    high vs low group. `pref` ∈ [-1, 1] (+ = likes the high signal). Returns None
+    when it can't separate (too little signal), so the weight isn't moved blindly.
+    """
+    sig = [(v, vote) for v, vote in pairs if v > 0]  # only those carrying the signal
+    if len(sig) < WEIGHT_PREF_MIN_VOTES:             # (e.g. a tweet w/ likes; reddit pop=0 is excluded)
+        return None
+    median = sorted(v for v, _ in sig)[len(sig) // 2]
+    high = [vote for v, vote in sig if v > median]
+    low = [vote for v, vote in sig if v <= median]
+    if not high or not low:
+        return None
+    like_high = sum(1 for x in high if x == 1) / len(high)
+    like_low = sum(1 for x in low if x == 1) / len(low)
+    pref = like_high - like_low  # [-1, 1]
+    lo, hi = WEIGHT_PREF_BOUNDS
+    return max(lo, min(hi, 1.0 + WEIGHT_PREF_GAIN * pref))
+
+
+async def _auto_tune_weights(
+    db: Database, user_id: int, bucket_key: str, platforms: list[str]
+) -> None:
+    """Learns the POPULARITY and RECENCY multipliers of the bucket from YOUR votes:
+    if you like high-engagement items more, `pop` rises; if you like recent ones
+    more, `recency` rises. Semantic (affinity) stays dominant — the multipliers are
+    bounded (`WEIGHT_PREF_BOUNDS`). Small step (EMA).
+
+    Recency is measured AT VOTE TIME (was it fresh when you voted?), not now —
+    otherwise every old vote would look like "a vote on something stale".
+    """
+    try:
+        rows = await db.vote_meta_signal(user_id, platforms)
+    except Exception:  # pragma: no cover
+        return
+    if len(rows) < WEIGHT_PREF_MIN_VOTES:
+        return
+    pop_pairs, rec_pairs = [], []
+    for r in rows:
+        pop_pairs.append((_popularity_boost(r), int(r["vote"])))
+        pub, voted = r["published_at"], r["voted_at"]
+        if pub is not None and voted is not None:
+            age = max(0.0, (voted.timestamp() - pub.timestamp()) / 86400.0)
+            rv = float(0.5 ** (age / RECENCY_HALFLIFE_DAYS))
+        else:
+            rv = 0.0
+        rec_pairs.append((rv, int(r["vote"])))
+
+    cur_pop, cur_rec = await db.get_weight_prefs(user_id, bucket_key)
+    lo, hi = WEIGHT_PREF_BOUNDS
+    t_pop = _weight_pref_target(pop_pairs)
+    t_rec = _weight_pref_target(rec_pairs)
+    new_pop = cur_pop if t_pop is None else max(lo, min(hi, cur_pop + WEIGHT_PREF_STEP * (t_pop - cur_pop)))
+    new_rec = cur_rec if t_rec is None else max(lo, min(hi, cur_rec + WEIGHT_PREF_STEP * (t_rec - cur_rec)))
+    if abs(new_pop - cur_pop) >= 0.01 or abs(new_rec - cur_rec) >= 0.01:
+        await db.set_weight_prefs(user_id, bucket_key, new_pop, new_rec)
+        logger.info(
+            "auto-weights %s: pop %.2f->%.2f, rec %.2f->%.2f (%d votes)",
+            bucket_key, cur_pop, new_pop, cur_rec, new_rec, len(rows),
         )
 
 
@@ -449,14 +530,18 @@ async def _deliver_bucket(
       - relevance: your 👍/👎 affinity WITHIN this bucket + the active /focus;
       - popularity: engagement (stars on github, likes+RTs on X);
       - recency: how recently it was published (decays by half-life).
-    A recent + relevant + popular item combines all three and rises to the top;
-    none replaces the others. Affinity here only RANKS (👍 rises, 👎 sinks).
+    A recent + relevant + popular item combines all three and rises to the top.
+    The popularity/recency weights are LEARNED from your votes (bounded + capped so
+    semantic stays dominant). Affinity here only RANKS (👍 rises, 👎 sinks).
     """
     likes, dislikes = await db.vote_counts(user_id, platforms=platforms)
     affinity_on = (likes + dislikes) >= MIN_VOTES_FOR_AFFINITY
     focuses = await db.active_focus(user_id, bucket_key)
 
     # The 3 pillars: relevance (affinity+focus) + popularity + recency.
+    # pop_mult/rec_mult are LEARNED from your votes (1.0 = neutral): if you like
+    # popular/recent items more, the weight rises — bounded so semantic dominates.
+    pop_mult, rec_mult = await db.get_weight_prefs(user_id, bucket_key)
     now_ts = datetime.now(timezone.utc).timestamp()
     scored = []
     for rec in recs:
@@ -478,11 +563,14 @@ async def _deliver_bucket(
             # --- (1) RELEVANCE: active direction (/focus) ---
             if focuses:
                 score += _focus_boost(emb, focuses)
-        # --- (2) POPULARITY: stars on github, likes+RTs on X ---
-        # a big launch rises by engagement even without matching affinity.
-        score += _popularity_boost(rec)
-        # --- (3) RECENCY: freshly launched rises (decays by half-life) ---
-        score += _recency_boost(rec, now_ts)
+        # --- (2)+(3) POPULARITY + RECENCY, weighted by your learned taste ---
+        # stars/likes+RTs (a big launch rises without matching affinity) and
+        # freshness (decays by half-life). Summed with a CAP so semantic dominates.
+        nonsem = (
+            pop_mult * _popularity_boost(rec)
+            + rec_mult * _recency_boost(rec, now_ts)
+        )
+        score += min(POP_REC_CAP, nonsem)
         scored.append((rec, score))
 
     scored.sort(key=lambda t: t[1], reverse=True)
