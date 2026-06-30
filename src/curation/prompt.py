@@ -88,19 +88,24 @@ resource, and SLOP is the enemy. Topic variety is welcome; LOW SIGNAL is not.
 =====================================================================
 WHAT TO REJECT  (verdict = "reject")  — pick the best `reject_reason`
 =====================================================================
-- "ai_slop": THE TOP REJECT. Clickbait, hype, engagement-bait, and RUMOR/LEAK
-  speculation with no concrete substance — "🚨", "X is dead", "you're already
-  behind", "the ONE trick", "this changes everything", thread-bait ("🧵👇"),
-  grand hot takes ("jobs are becoming less valuable"), and especially rumor/leak/
-  speculation chatter ("X leaked 👀", "could drop next week", "if X ships
-  tomorrow will you…", "rumor watch is heating up", "spotted in an internal
-  string"). BUT — hype FRAMING alone does NOT make it slop if the post carries a
-  CONCRETE, verifiable fact: real numbers (e.g. "1.55x faster, no price
-  increase", a benchmark score), a NAMED release with actual details/specs, or a
-  real reported event (a launch, a rollout limit, a partnership preview). In that
-  case look PAST the framing and judge it on substance as ai_capabilities or
-  ai_industry. Reject as ai_slop only when, stripped of the hype, there is
-  NOTHING concrete left — pure speculation, opinion, or announcement-fluff.
+- "ai_slop": THE TOP REJECT. Clickbait, hype, engagement-bait, RUMOR/LEAK
+  speculation, and MONEY/INCOME-FLEX with no usable substance — "🚨", "X is
+  dead", "you're already behind", "the ONE trick", "this changes everything",
+  thread-bait ("🧵👇"), grand hot takes ("jobs are becoming less valuable"),
+  income-flex / sales-brag hooks ("easiest $X I ever made", "how I made $X with
+  AI", "I built this for a client and made $Y", "this side hustle prints money"),
+  and especially rumor/leak/speculation chatter ("X leaked 👀", "could drop next
+  week", "if X ships tomorrow will you…", "rumor watch is heating up", "spotted
+  in an internal string"). BUT — hype FRAMING alone does NOT make it slop if the
+  post carries a CONCRETE, verifiable fact: real numbers (e.g. "1.55x faster, no
+  price increase", a benchmark score), a NAMED release with actual details/specs,
+  or a real reported event (a launch, a rollout limit, a partnership preview). In
+  that case look PAST the framing and judge it on substance as ai_capabilities or
+  ai_industry. A money/income-flex or "look what I sold" post stays ai_slop even
+  if it name-drops a real build — the POINT is the flex/sale, not a tool or
+  technique the reader could use. Reject as ai_slop only when, stripped of the
+  hype, there is NOTHING concrete AND usable left — pure speculation, opinion,
+  flex, or announcement-fluff.
 - "low_signal": generic, rambling, or obvious content with little information
   density — the kind of AI item any tech-news portal would run, adding no tools
   or possibilities. Long posts that say little; "my thoughts on AI"; vague
@@ -436,6 +441,25 @@ VERDICT:
    verifiable."}
 WHY: All "could / maybe / people are saying / if it ships" — speculation, not a
 fact. Stripped of the hype there is nothing concrete. Reject as ai_slop.
+
+--- EXAMPLE 18 (money/income-flex -> reject, even with a real build) -
+POST:
+  "Easiest $420 I ever made 🤑 Built an e-commerce marketplace for a client, then
+  bolted on an MCP server + FastAPI so ChatGPT auto-writes the product SEO. He
+  loved it. This is the AI side-hustle goldmine nobody's talking about."
+VERDICT:
+  {"verdict": "reject", "confidence": 0.85,
+   "primary_category": "other", "reject_reason": "ai_slop",
+   "summary": "Income-flex post ('easiest $420 I ever made') about a client gig
+   with MCP+FastAPI for SEO, but the focus is the money/hustle, with no how-to or
+   reusable tool.",
+   "one_line_rationale": "Income-flex/side-hustle brag — the point is the money,
+   not a usable tool or technique."}
+WHY: It name-drops a real stack (MCP + FastAPI), but the POINT is the money flex
+and the "side-hustle goldmine" hook — no architecture, no how-to, nothing the
+reader could actually build from. Reject as ai_slop. (If it dropped the flex and
+actually explained the MCP+FastAPI SEO pipeline with detail, it would flip to
+applied_techniques.)
 
 =====================================================================
 CALIBRATION NOTES  (how to set confidence and resolve ties)
