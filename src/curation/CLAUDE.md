@@ -82,8 +82,9 @@ with a monthly spend ceiling. The instruction "personas" are written in English
     AI Slop — the 5 approval categories `ai_tools`, `ai_capabilities`,
     `applied_techniques`, `autonomous_agents`, `ai_industry`, and the rejection
     reasons `ai_slop`, `low_signal`, `research_only`, `corporate_hype`,
-    `basic_tutorial`, `off_topic`, `none`) plus `_EXAMPLES` (15 worked boundary
-    examples covering applied-AI approves and slop/research_only rejects). The
+    `basic_tutorial`, `off_topic`, `none`) plus `_EXAMPLES` (18 worked boundary
+    examples covering applied-AI approves and slop/research_only/income-flex
+    rejects, incl. the carve-out "concrete substance survives a hype tone"). The
     padding is NOT filler: the
     examples calibrate the classifier AND push the prefix above the cache floor.
     Golden rule: nothing dynamic in `RUBRIC` — any byte that changes invalidates
