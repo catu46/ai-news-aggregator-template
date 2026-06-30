@@ -353,6 +353,12 @@ DEPLOY.md                 # step-by-step deploy guide
 
 ---
 
+## 🗺️ Next steps
+
+- **`/calibrate` — interactive cold-start for the ranking.** Today the popularity/recency weights are **learned from your votes** over several days (daily EMA). The idea: a `/calibrate` command where the bot shows you 4-5 **real, varied** items (viral/niche × fresh/old × different topics), you react, and it **seeds on the spot** the `pop`/`recency` multipliers (`set_weight_prefs`) + affinity (👍/👎 on the ones you pick) — instead of waiting for the EMA to converge. Keeps **semantic dominant** (the `POP_REC_CAP` cap); it only speeds up bootstrapping your taste.
+
+---
+
 ## 📜 License
 
 Open-source template — fork it, spin up your copy, tweak the sources, and have fun. Always keep your **keys** (`.env`) out of version control. `config/sources.yaml`/`config/seeds.yaml` carry personal data (not credentials): in **public** forks, gitignore them; in your **private** deploy repo, they typically need to be committed for Railway to build (see step 6 and `DEPLOY.md`).
