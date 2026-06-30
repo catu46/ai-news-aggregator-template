@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import time as dtime
+from datetime import datetime, time as dtime, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -61,10 +61,24 @@ SEARCH_LIMIT = 10
 # Affinity: uses your 👍/👎 ONLY to RANK the feed (👎 sinks, 👍 rises).
 # Nothing is hidden — all approved content ends up delivered, just in order.
 MIN_VOTES_FOR_AFFINITY = 1        # turns ranking on starting from the 1st vote
-# Star bonus in the repos bucket: score += STAR_WEIGHT * log10(stars).
-# e.g. 1k★ -> +0.75, 10k★ -> +1.0, 50k★ -> +1.17 (log scale so a giant doesn't
-# steamroll affinity/focus). Only affects github (the only source with 'stars').
+# POPULARITY/importance bonus in delivery: score += WEIGHT * log10(engagement).
+# A big launch (e.g. GPT-5.6) comes with LOTS of engagement even when it doesn't
+# match your affinity — this signal lifts it. All in log10 so a viral item
+# doesn't steamroll affinity/focus; it MIXES with them (doesn't replace). Per
+# platform:
+#   github : STAR_WEIGHT  * log10(stars)            — e.g. 1k★ +0.75, 50k★ +1.17
+#   twitter: TWEET_POP_WEIGHT * log10(likes + 3·RT) — a RT weighs more than a like
+#   reddit : no engagement field in metadata (RSS) -> 0 (affinity+focus only)
 STAR_WEIGHT = 0.25
+TWEET_POP_WEIGHT = 0.35
+# Recency: the THIRD ranking pillar (alongside relevance and popularity). Freshly
+# launched items rise; decays by exponential half-life.
+# score += RECENCY_WEIGHT * 0.5^(age_days / RECENCY_HALFLIFE_DAYS).
+# e.g. (weight 1.0, half-life 4d): today +1.0, 4d +0.50, 8d +0.25, 16d +0.06.
+# Calibrated to sit at the same level as popularity/affinity so a recent +
+# relevant + popular item combines all three and rises (replaces nothing).
+RECENCY_WEIGHT = 1.0
+RECENCY_HALFLIFE_DAYS = 4.0
 
 # Daily digest in 2 buckets: (header, source platforms, cap per digest).
 REPOS_PER_DIGEST = 5
@@ -359,6 +373,47 @@ def _focus_boost(emb, focuses) -> float:
     return boost
 
 
+def _popularity_boost(rec) -> float:
+    """POPULARITY/importance bonus for a post (independent of the embedding).
+
+    The owner's intuition: a hugely important launch (e.g. GPT-5.6) may NOT match
+    their affinity, but engagement (likes/RTs/stars) is the signal that "this is
+    big" — so it should rise. All in log10 so a viral item doesn't steamroll
+    affinity/focus. See `STAR_WEIGHT`/`TWEET_POP_WEIGHT`.
+      - github : stars
+      - twitter: likes + 3·retweets (a RT is a stronger signal than a like)
+      - reddit : no engagement field in metadata (RSS) -> 0
+    """
+    meta = rec["metadata"] or {}
+    sp = rec["source_platform"]
+    if sp == "github":
+        stars = meta.get("stars")
+        if stars:
+            return STAR_WEIGHT * float(np.log10(max(int(stars), 1)))
+    elif sp == "twitter":
+        try:
+            eng = int(meta.get("like_count") or 0) + 3 * int(meta.get("retweet_count") or 0)
+        except (TypeError, ValueError):
+            eng = 0
+        if eng > 0:
+            return TWEET_POP_WEIGHT * float(np.log10(eng))
+    return 0.0
+
+
+def _recency_boost(rec, now_ts: float) -> float:
+    """How NEW the post is (0 = old or no date). The third pillar of the score,
+    alongside relevance (affinity+focus) and popularity.
+
+    Decays by exponential half-life (`RECENCY_HALFLIFE_DAYS`): a freshly launched
+    item gets the full boost and fades smoothly. Depends only on `published_at`.
+    """
+    pub = _pub_ts(rec)
+    if pub <= 0:
+        return 0.0
+    age_days = max(0.0, (now_ts - pub) / 86400.0)
+    return RECENCY_WEIGHT * float(0.5 ** (age_days / RECENCY_HALFLIFE_DAYS))
+
+
 async def _bucket_cap(db: Database, user_id: int, bucket_key: str) -> int:
     """Per-day card cap of the bucket: the user's override (B) or the BUCKETS default."""
     n = await db.get_digest_size(user_id, bucket_key)
@@ -390,21 +445,25 @@ async def _deliver_bucket(
 ) -> int:
     """Ranks and delivers ONE bucket.
 
-    Two signals add up in each card's score:
-      - affinity: your 👍/👎 WITHIN this bucket (restricted to `platforms`);
-      - direction (/focus): this bucket's active topic re-ranks toward it.
-    Affinity here only RANKS (👍 rises, 👎 sinks); nothing is hidden.
+    THREE pillars add up in each card's score — relevance + popularity + recency:
+      - relevance: your 👍/👎 affinity WITHIN this bucket + the active /focus;
+      - popularity: engagement (stars on github, likes+RTs on X);
+      - recency: how recently it was published (decays by half-life).
+    A recent + relevant + popular item combines all three and rises to the top;
+    none replaces the others. Affinity here only RANKS (👍 rises, 👎 sinks).
     """
     likes, dislikes = await db.vote_counts(user_id, platforms=platforms)
     affinity_on = (likes + dislikes) >= MIN_VOTES_FOR_AFFINITY
     focuses = await db.active_focus(user_id, bucket_key)
 
+    # The 3 pillars: relevance (affinity+focus) + popularity + recency.
+    now_ts = datetime.now(timezone.utc).timestamp()
     scored = []
     for rec in recs:
         score = 0.0
         emb = rec["embedding"]
         if emb is not None:
-            # --- affinity (👍/👎 of this bucket): only RANKS, never hides ---
+            # --- (1) RELEVANCE: affinity (👍/👎 of this bucket) only RANKS ---
             if affinity_on:
                 try:
                     neighbors = await db.nearest_votes(
@@ -416,15 +475,14 @@ async def _deliver_bucket(
                 score += sum(
                     n["vote"] * max(0.0, 1.0 - float(n["dist"])) for n in neighbors
                 )
-            # --- active direction (/focus) ---
+            # --- (1) RELEVANCE: active direction (/focus) ---
             if focuses:
                 score += _focus_boost(emb, focuses)
-        # --- star bonus (repos): a repo with more stars ranks higher ---
-        # (only github has 'stars' in metadata; log10 so a giant doesn't
-        # steamroll everything). Independent of the embedding.
-        stars = (rec["metadata"] or {}).get("stars")
-        if stars:
-            score += STAR_WEIGHT * float(np.log10(max(int(stars), 1)))
+        # --- (2) POPULARITY: stars on github, likes+RTs on X ---
+        # a big launch rises by engagement even without matching affinity.
+        score += _popularity_boost(rec)
+        # --- (3) RECENCY: freshly launched rises (decays by half-life) ---
+        score += _recency_boost(rec, now_ts)
         scored.append((rec, score))
 
     scored.sort(key=lambda t: t[1], reverse=True)
