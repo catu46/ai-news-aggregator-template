@@ -437,6 +437,73 @@ class Database:
             )
         return [r["topic"] for r in rows]
 
+    # ------------------------------------------------------------------ meta
+    async def meta_get(self, key: str) -> dict | None:
+        """Reads `meta.value` (JSONB) by key. None if the key doesn't exist.
+
+        If the `meta` table doesn't exist yet (the
+        db/migrations/2026-07-23-meta-kv.sql migration is pending), Postgres
+        raises `asyncpg.exceptions.UndefinedTableError` — left to propagate
+        on purpose so the caller decides the fallback (see `SpendGuard` in
+        src/curation/curator.py, same pattern as `hybrid_recall`/`recall.py`).
+        """
+        async with self.pool.acquire() as c:
+            row = await c.fetchrow("SELECT value FROM meta WHERE key = $1", key)
+        return row["value"] if row else None
+
+    async def meta_set(self, key: str, value: dict) -> None:
+        """Writes/replaces `meta.value` (JSONB) for the key. Simple upsert.
+
+        Same missing-table behavior -> `UndefinedTableError`, same contract
+        as `meta_get`.
+        """
+        async with self.pool.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO meta (key, value, updated_at)
+                VALUES ($1, $2, now())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = $2, updated_at = now()
+                """,
+                key, value,
+            )
+
+    async def add_curator_spend(self, month_key: str, usd: float) -> float:
+        """Atomic increment of the curator's monthly spend. Returns the
+        month's total (`month_key`, e.g. '2026-07') AFTER adding `usd`.
+
+        `meta.value` for the 'curator_spend' key is a dict {"YYYY-MM": total,
+        ...} — older months are left untouched. Reads with `FOR UPDATE` and
+        writes in the SAME transaction so an increment isn't lost if two
+        cycles run in parallel (doesn't happen in practice today, but it's
+        cheap to guarantee). The new total is computed in Python (not in a
+        SQL CASE/expr) and passed as its own parameter — reusing a parameter
+        inside a CASE leaves the type ambiguous for Postgres (this is the
+        `AmbiguousParameterError` that took down ingestion on 2026-07-23; see
+        `upsert_post` above).
+
+        Same missing-table behavior -> `UndefinedTableError`, same contract
+        as `meta_get`.
+        """
+        async with self.pool.acquire() as c:
+            async with c.transaction():
+                row = await c.fetchrow(
+                    "SELECT value FROM meta WHERE key = 'curator_spend' FOR UPDATE"
+                )
+                data: dict = dict(row["value"]) if row and row["value"] else {}
+                new_total = float(data.get(month_key, 0.0)) + float(usd)
+                data[month_key] = new_total
+                await c.execute(
+                    """
+                    INSERT INTO meta (key, value, updated_at)
+                    VALUES ('curator_spend', $1, now())
+                    ON CONFLICT (key) DO UPDATE
+                        SET value = $1, updated_at = now()
+                    """,
+                    data,
+                )
+                return new_total
+
     # --------------------------------------------------------------- search
     async def search_pool(
         self, user_id: int, query_embedding, limit: int = 10,

@@ -37,7 +37,8 @@ class Settings:
     telegram_bot_token: str
     database_url: str
     github_token: str | None
-    curator_provider: str          # 'anthropic' (default) | 'kimi' | 'deepseek'
+    curation_max_per_cycle: int    # cap of curator judgments per cycle (a big backlog dilutes)
+    curator_provider: str          # 'deepseek' (default) | 'anthropic' | 'kimi'
     moonshot_api_key: str | None    # if curator_provider='kimi'
     moonshot_base_url: str
     kimi_model: str
@@ -66,6 +67,12 @@ def load_settings() -> Settings:
         anthropic_api_key=_env("ANTHROPIC_API_KEY", required=True),
         curator_model=_env("CURATOR_MODEL", "claude-haiku-4-5"),
         curator_monthly_budget_usd=float(_env("CURATOR_MONTHLY_BUDGET_USD", "8")),
+        # Cap of posts classified per CYCLE (not per month — that's the
+        # SpendGuard already). Protects against a big backlog (e.g. ingestion
+        # broken for 24h) turning into one giant curation run in a single
+        # execution; the overflow stays pending and resumes next cycle (see
+        # run_curation in src/pipeline.py).
+        curation_max_per_cycle=int(_env("CURATION_MAX_PER_CYCLE", "150")),
         voyage_api_key=_env("VOYAGE_API_KEY", required=True),
         embedding_model=embedding_model,
         # Default = same model as the documents (no behavior change until you set
@@ -86,7 +93,7 @@ def load_settings() -> Settings:
         telegram_bot_token=_env("TELEGRAM_BOT_TOKEN", required=True),
         database_url=_env("DATABASE_URL", required=True),
         github_token=_env("GITHUB_TOKEN"),
-        curator_provider=_env("CURATOR_PROVIDER", "anthropic"),
+        curator_provider=_env("CURATOR_PROVIDER", "deepseek"),
         moonshot_api_key=_env("MOONSHOT_API_KEY"),
         moonshot_base_url=_env("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1"),
         kimi_model=_env("KIMI_MODEL", "kimi-k2.6"),

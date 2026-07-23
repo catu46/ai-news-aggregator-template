@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .common.config import load_settings, load_sources
+from .common.config import Settings, load_settings, load_sources
 from .common.db import Database
 from .common.embeddings import Embedder
 from .ingestion.reddit_source import RedditSource
@@ -39,6 +39,12 @@ logger = logging.getLogger("pipeline")
 # and gives natural log/progress points during long runs.
 EMBED_BATCH = 100
 CURATION_BATCH = 100
+
+# Default for settings.curation_max_per_cycle when `run_curation` is called
+# without `settings` (e.g. a direct call in a test/REPL). See the
+# `run_curation` docstring — the "real" value comes from CURATION_MAX_PER_CYCLE
+# (env).
+CURATION_MAX_PER_CYCLE_DEFAULT = 150
 
 
 # ---------------------------------------------------------------------------
@@ -165,20 +171,47 @@ async def run_embedding(db: Database, embedder: Embedder, settings) -> int:
 # ---------------------------------------------------------------------------
 # 4. CURATE
 # ---------------------------------------------------------------------------
-async def run_curation(db: Database, curator: Curator) -> int:
+async def run_curation(
+    db: Database, curator: Curator, settings: Settings | None = None,
+    *, on_budget_exceeded=None,
+) -> int:
     """Classify pending posts via Haiku. Returns the total classified.
 
     GLOBAL quality verdict: there's no user signal here, so
     similarity_signal=None. On BudgetExceeded, the step shuts down gracefully
     (the pending posts are left for the next cycle).
+
+    `on_budget_exceeded`: optional coroutine `async (exc: BudgetExceeded) ->
+    None`, called when the monthly cap is exceeded — the bot uses this to
+    WARN the user on Telegram instead of pausing in silence (in jul/2026
+    curation stayed dead for 17 days without anyone noticing). A failure in
+    the alert never takes down the step.
+
+    Per-cycle cap (`settings.curation_max_per_cycle`, default 150): without
+    it, a big backlog (e.g. after 24h of broken ingestion) would get curated
+    all at once in a single run — the SpendGuard's MONTHLY cap doesn't
+    protect against that spike within one cycle. When the cap is hit, the
+    loop stops and the rest stays pending (verdict IS NULL); the next cycle
+    (30 min later, via the JobQueue) picks up from there, diluting the
+    backlog across several runs instead of turning into a surprise bill from
+    a single hour.
     """
+    max_per_cycle = (
+        settings.curation_max_per_cycle if settings is not None
+        else CURATION_MAX_PER_CYCLE_DEFAULT
+    )
     total = 0
+    hit_cap = False
     try:
         interests = await db.all_active_focus_topics()  # topics the user wants RIGHT NOW
     except Exception:  # noqa: BLE001 — no active focus changes nothing
         interests = []
     while True:
-        pending = await db.posts_pending_curation(limit=CURATION_BATCH)
+        if total >= max_per_cycle:
+            hit_cap = True
+            break
+        batch_limit = min(CURATION_BATCH, max_per_cycle - total)
+        pending = await db.posts_pending_curation(limit=batch_limit)
         if not pending:
             break
 
@@ -203,6 +236,11 @@ async def run_curation(db: Database, curator: Curator) -> int:
                 # Monthly spending cap reached: stop curating gracefully.
                 logger.warning("curate: spending cap reached (%s); ending step", exc)
                 logger.info("curate: %d post(s) classified before the cap", total)
+                if on_budget_exceeded is not None:
+                    try:
+                        await on_budget_exceeded(exc)
+                    except Exception:  # noqa: BLE001 — the alert never takes down the step
+                        logger.exception("curate: failed to notify about the spending cap")
                 return total
             except Exception:  # noqa: BLE001 — API/parse error on a single post
                 logger.exception("curate: failed to classify post %s", record["id"])
@@ -219,9 +257,14 @@ async def run_curation(db: Database, curator: Curator) -> int:
 
         logger.info("curate: batch processed (running total %d)", total)
 
-        if len(pending) < CURATION_BATCH:
+        if len(pending) < batch_limit:
             break
 
+    if hit_cap:
+        logger.warning(
+            "curate: cycle cap reached (%d); backlog continues next cycle",
+            max_per_cycle,
+        )
     logger.info("curate: %d post(s) classified in total", total)
     return total
 
@@ -249,7 +292,10 @@ async def main() -> None:
     db = Database(settings.database_url)
     await db.connect()
     embedder = Embedder(settings)
-    curator = make_curator(settings)
+    # db=... : the SpendGuard uses the `meta` table (persistent source of
+    # truth) instead of just the local file — see make_curator()/SpendGuard
+    # in src/curation/curator.py.
+    curator = make_curator(settings, db=db)
 
     try:
         # 2. Make sure every user exists (idempotent).
@@ -259,7 +305,7 @@ async def main() -> None:
         # 3. Ingest → Embed → Curate (in this order; each step feeds the next).
         await run_ingestion(db)
         await run_embedding(db, embedder, settings)
-        await run_curation(db, curator)
+        await run_curation(db, curator, settings)
     finally:
         await db.close()
 

@@ -23,12 +23,17 @@ import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anthropic
+import asyncpg
 
 from ..common.config import Settings
 from ..common.models import Verdict
 from .prompt import RUBRIC, build_user_message
+
+if TYPE_CHECKING:  # avoids a circular import at runtime; only for the type hint
+    from ..common.db import Database
 
 logger = logging.getLogger("curator")
 
@@ -48,6 +53,12 @@ _DEFAULT_SPEND_PATH = Path(
     os.path.expanduser("~/.cache/ai-news-aggregator/spend.json")
 )
 
+# "Table doesn't exist" error raised when the db/migrations/2026-07-23-meta-kv.sql
+# migration hasn't been applied yet — caught so we fall back to the local file
+# instead of taking curation down with it. Same pattern as
+# `recall.py`'s missing-hybrid-column handling.
+_MISSING_META_TABLE_ERRORS = (asyncpg.exceptions.UndefinedTableError,)
+
 
 class BudgetExceeded(RuntimeError):
     """The curator's estimated monthly spend exceeded the configured budget."""
@@ -63,22 +74,55 @@ class BudgetExceeded(RuntimeError):
 
 
 # --------------------------------------------------------------------------
-# Spend guard: accumulates approximate USD in a small JSON, keyed by month.
-# Thread-safe (simple lock) — the I/O is trivial and rare enough.
+# Spend guard: accumulates approximate USD, keyed by month.
+#
+# Source of truth: the database's `meta` table (key 'curator_spend'), when a
+# `Database` is available — it's the only persistent source of truth on
+# Railway. Fallback: a local file (~/.cache/.../spend.json), used when
+# `db=None` OR the `meta` table doesn't exist yet (the
+# db/migrations/2026-07-23-meta-kv.sql migration hasn't been applied).
+#
+# WHY THE FILE ALONE ISN'T ENOUGH: Railway's disk is EPHEMERAL — every deploy
+# brings up a fresh container, without the previous one's filesystem. The
+# local file used to reset on every deploy, so the `CURATOR_MONTHLY_BUDGET_USD`
+# cap never actually fired (the spend "seen" by the process never accumulated
+# across deploys). It still exists as a fallback (works fine locally, and
+# keeps curation from breaking if the DB is down or the migration hasn't run
+# yet) — but it stops being the reliable source of truth in production as
+# soon as the database is available.
+#
+# Thread-safe on the file path (a simple lock) — the I/O is trivial and rare
+# enough. The DB path uses Postgres's own transaction (see
+# `Database.add_curator_spend`) for atomicity.
 # --------------------------------------------------------------------------
 class SpendGuard:
-    """Persists the estimated monthly spend in ~/.cache/.../spend.json."""
+    """Persists the estimated monthly spend. The database (meta table) is the
+    source of truth when available; the local file (~/.cache/.../spend.json)
+    is the fallback — see the comment above the class."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, db: "Database | None" = None) -> None:
         self._path = path or _DEFAULT_SPEND_PATH
         self._lock = threading.Lock()
+        self._db = db
+        self._warned_meta_missing = False  # pending-migration warning only once
 
     @staticmethod
     def _month_key(now: datetime | None = None) -> str:
         now = now or datetime.now(timezone.utc)
         return now.strftime("%Y-%m")
 
-    def _read(self) -> dict[str, float]:
+    def _warn_meta_missing_once(self) -> None:
+        if self._warned_meta_missing:
+            return
+        logger.warning(
+            "SpendGuard: the meta table doesn't exist yet (migration "
+            "db/migrations/2026-07-23-meta-kv.sql pending) — falling back to "
+            "the local file (%s). This warning only appears once.", self._path,
+        )
+        self._warned_meta_missing = True
+
+    # ---- file fallback (sync; only used when db=None or the DB fails) -------
+    def _read_file(self) -> dict[str, float]:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError, OSError):
@@ -86,32 +130,48 @@ class SpendGuard:
         # Sanitize: only str->float pairs.
         return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
 
-    def _write(self, data: dict[str, float]) -> None:
+    def _write_file(self, data: dict[str, float]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic write: write to tmp and rename.
         tmp = self._path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
         tmp.replace(self._path)
 
-    def spent_this_month(self) -> float:
+    # ---- public API (async: the DB path needs it) ---------------------------
+    async def spent_this_month(self) -> float:
         """Accumulated spend (USD) for the current month."""
+        if self._db is not None:
+            try:
+                data = await self._db.meta_get("curator_spend")
+                return float((data or {}).get(self._month_key(), 0.0))
+            except _MISSING_META_TABLE_ERRORS:
+                self._warn_meta_missing_once()
+            except Exception:  # noqa: BLE001 — a flaky DB can't block the read
+                logger.exception("SpendGuard: failed to read spend from the DB; using the local file")
         with self._lock:
-            return self._read().get(self._month_key(), 0.0)
+            return self._read_file().get(self._month_key(), 0.0)
 
-    def add(self, usd: float) -> float:
+    async def add(self, usd: float) -> float:
         """Adds `usd` to the current month; returns the new month total."""
         if usd <= 0:
-            return self.spent_this_month()
+            return await self.spent_this_month()
+        if self._db is not None:
+            try:
+                return await self._db.add_curator_spend(self._month_key(), usd)
+            except _MISSING_META_TABLE_ERRORS:
+                self._warn_meta_missing_once()
+            except Exception:  # noqa: BLE001 — a flaky DB can't block accounting
+                logger.exception("SpendGuard: failed to write spend to the DB; using the local file")
         with self._lock:
-            data = self._read()
+            data = self._read_file()
             key = self._month_key()
             data[key] = data.get(key, 0.0) + usd
-            self._write(data)
+            self._write_file(data)
             return data[key]
 
-    def is_over_budget(self, budget_usd: float) -> bool:
+    async def is_over_budget(self, budget_usd: float) -> bool:
         """True if the month's spend has already reached/exceeded the budget."""
-        return self.spent_this_month() >= budget_usd
+        return await self.spent_this_month() >= budget_usd
 
 
 def estimate_cost_usd(usage: object) -> float:
@@ -189,13 +249,12 @@ class AnthropicCurator(Curator):
         ]
 
     # ---- budget guard (exposed for the runner to check before running) ------
-    @property
-    def spent_this_month(self) -> float:
-        return self._spend.spent_this_month()
+    async def spent_this_month(self) -> float:
+        return await self._spend.spent_this_month()
 
-    def is_over_budget(self, budget_usd: float | None = None) -> bool:
+    async def is_over_budget(self, budget_usd: float | None = None) -> bool:
         """True if the month's spend reached the budget (default = the one in Settings)."""
-        return self._spend.is_over_budget(
+        return await self._spend.is_over_budget(
             self._budget_usd if budget_usd is None else budget_usd
         )
 
@@ -204,9 +263,9 @@ class AnthropicCurator(Curator):
         interests: list[str] | None = None,
     ) -> Verdict | None:
         # Budget gate BEFORE spending: cheap and prevents blowing past it.
-        if self.is_over_budget():
+        if await self.is_over_budget():
             raise BudgetExceeded(
-                SpendGuard._month_key(), self.spent_this_month, self._budget_usd
+                SpendGuard._month_key(), await self.spent_this_month(), self._budget_usd
             )
 
         user_message = build_user_message(
@@ -229,7 +288,7 @@ class AnthropicCurator(Curator):
 
         # ALWAYS account for the spend (even on failure — tokens were already billed).
         try:
-            self._spend.add(estimate_cost_usd(resp.usage))
+            await self._spend.add(estimate_cost_usd(resp.usage))
         except Exception:  # noqa: BLE001 — accounting never takes down curation
             pass
 
@@ -337,12 +396,11 @@ class KimiCurator(Curator):
         # Static system prefix (RUBRIC + JSON contract) -> Kimi cache.
         self._system = RUBRIC + _KIMI_JSON_CONTRACT
 
-    @property
-    def spent_this_month(self) -> float:
-        return self._spend.spent_this_month()
+    async def spent_this_month(self) -> float:
+        return await self._spend.spent_this_month()
 
-    def is_over_budget(self, budget_usd: float | None = None) -> bool:
-        return self._spend.is_over_budget(
+    async def is_over_budget(self, budget_usd: float | None = None) -> bool:
+        return await self._spend.is_over_budget(
             self._budget_usd if budget_usd is None else budget_usd
         )
 
@@ -350,9 +408,9 @@ class KimiCurator(Curator):
         self, post_text: str, similarity_signal: str | None = None,
         interests: list[str] | None = None,
     ) -> Verdict | None:
-        if self.is_over_budget():
+        if await self.is_over_budget():
             raise BudgetExceeded(
-                SpendGuard._month_key(), self.spent_this_month, self._budget_usd
+                SpendGuard._month_key(), await self.spent_this_month(), self._budget_usd
             )
 
         user_message = build_user_message(
@@ -376,7 +434,7 @@ class KimiCurator(Curator):
 
         # ALWAYS account for the spend (tokens were already billed).
         try:
-            self._spend.add(estimate_kimi_cost_usd(resp.usage))
+            await self._spend.add(estimate_kimi_cost_usd(resp.usage))
         except Exception:  # noqa: BLE001 — accounting never takes down curation
             pass
 
@@ -466,12 +524,11 @@ class DeepSeekCurator(Curator):
         # Static system prefix (RUBRIC + JSON contract) -> automatic cache.
         self._system = RUBRIC + _KIMI_JSON_CONTRACT
 
-    @property
-    def spent_this_month(self) -> float:
-        return self._spend.spent_this_month()
+    async def spent_this_month(self) -> float:
+        return await self._spend.spent_this_month()
 
-    def is_over_budget(self, budget_usd: float | None = None) -> bool:
-        return self._spend.is_over_budget(
+    async def is_over_budget(self, budget_usd: float | None = None) -> bool:
+        return await self._spend.is_over_budget(
             self._budget_usd if budget_usd is None else budget_usd
         )
 
@@ -479,9 +536,9 @@ class DeepSeekCurator(Curator):
         self, post_text: str, similarity_signal: str | None = None,
         interests: list[str] | None = None,
     ) -> Verdict | None:
-        if self.is_over_budget():
+        if await self.is_over_budget():
             raise BudgetExceeded(
-                SpendGuard._month_key(), self.spent_this_month, self._budget_usd
+                SpendGuard._month_key(), await self.spent_this_month(), self._budget_usd
             )
 
         user_message = build_user_message(
@@ -509,7 +566,7 @@ class DeepSeekCurator(Curator):
 
         # ALWAYS account for the spend (tokens were already billed).
         try:
-            self._spend.add(estimate_deepseek_cost_usd(resp.usage))
+            await self._spend.add(estimate_deepseek_cost_usd(resp.usage))
         except Exception:  # noqa: BLE001 — accounting never takes down curation
             pass
 
@@ -534,16 +591,27 @@ class DeepSeekCurator(Curator):
         return verdict
 
 
-def make_curator(settings: Settings, *, spend_guard: SpendGuard | None = None) -> Curator:
+def make_curator(
+    settings: Settings, *,
+    spend_guard: SpendGuard | None = None,
+    db: "Database | None" = None,
+) -> Curator:
     """Curator factory: picks the provider via `settings.curator_provider`.
 
-    Default = Anthropic (Haiku). `CURATOR_PROVIDER=kimi` or `=deepseek` switches
-    provider without touching the rest of the pipeline (the `Curator` interface
-    is the same).
+    `CURATOR_PROVIDER` defaults to `deepseek` (cheapest — see .env.example);
+    `=kimi` or `=anthropic` switches provider without touching the rest of
+    the pipeline (the `Curator` interface is the same).
+
+    `db`: if given (and `spend_guard` isn't passed explicitly), the internal
+    `SpendGuard` uses the database (`meta` table) as the source of truth for
+    the monthly spend instead of just the local file — see `SpendGuard`
+    above. Pass `None` (default) to keep the file-only behavior, e.g. in
+    tests.
     """
+    guard = spend_guard if spend_guard is not None else SpendGuard(db=db)
     provider = (settings.curator_provider or "anthropic").lower()
     if provider == "kimi":
-        return KimiCurator(settings, spend_guard=spend_guard)
+        return KimiCurator(settings, spend_guard=guard)
     if provider == "deepseek":
-        return DeepSeekCurator(settings, spend_guard=spend_guard)
-    return AnthropicCurator(settings, spend_guard=spend_guard)
+        return DeepSeekCurator(settings, spend_guard=guard)
+    return AnthropicCurator(settings, spend_guard=guard)

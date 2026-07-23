@@ -730,6 +730,50 @@ async def _retry_pending_links(app: Application) -> None:
                     logger.exception("Failed to notify link retry (post_id=%s)", post_id)
 
 
+async def _notify_budget_exceeded(app, exc) -> None:
+    """Warns ALL authorized users that curation paused because of the budget.
+
+    At most 1 alert per month (dedup in the `meta` table, key
+    'budget_alert_sent', value {"YYYY-MM": true}); fallback: a flag in
+    bot_data (only good for this process, but keeps a DB/table failure from
+    spamming every 30-min cycle). Motivation: in jul/2026 an $8 cap paused
+    curation in SILENCE for 17 days and the digests degraded without anyone
+    understanding why.
+    """
+    key_flag = f"budget_alert_sent:{exc.month}"
+    if app.bot_data.get(key_flag):
+        return
+    app.bot_data[key_flag] = True  # lock in-process BEFORE any await (race/spam guard)
+
+    db: Database = app.bot_data[KEY_DB]
+    try:
+        sent: dict = (await db.meta_get("budget_alert_sent")) or {}
+        if sent.get(exc.month):
+            return  # already alerted this month (by another deploy/process)
+    except Exception:  # noqa: BLE001 — no meta, keep going with just the local flag
+        sent = {}
+
+    msg = (
+        "⚠️ Curation PAUSED: this month's budget is exhausted.\n\n"
+        f"Estimated spend in {exc.month}: ${exc.spent_usd:.2f} "
+        f"(cap: ${exc.budget_usd:.2f}).\n\n"
+        "Ingestion and delivery keep running, but nothing new will be judged "
+        "until the 1st. To resume earlier: raise CURATOR_MONTHLY_BUDGET_USD "
+        "on Railway."
+    )
+    for tg_id in app.bot_data.get(KEY_ALLOWED, set()):
+        try:
+            await app.bot.send_message(chat_id=tg_id, text=msg)
+        except Exception:  # noqa: BLE001 — one broken chat can't stop the others
+            logger.exception("budget alert: failed to send to %s", tg_id)
+
+    try:
+        sent[exc.month] = True
+        await db.meta_set("budget_alert_sent", sent)
+    except Exception:  # noqa: BLE001 — no meta, the local flag covers the rest of the month
+        logger.warning("budget alert: persistent dedup unavailable (meta table)")
+
+
 async def _job_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
     """JobQueue callback: runs the pipeline (ingest -> embed -> curate) in the bot.
 
@@ -744,7 +788,10 @@ async def _job_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
             app.bot_data[KEY_EMBEDDER],
             app.bot_data[KEY_SETTINGS],
         )
-        await run_curation(app.bot_data[KEY_DB], app.bot_data[KEY_CURATOR])
+        await run_curation(
+            app.bot_data[KEY_DB], app.bot_data[KEY_CURATOR], app.bot_data[KEY_SETTINGS],
+            on_budget_exceeded=lambda exc: _notify_budget_exceeded(app, exc),
+        )
         await _retry_pending_links(app)  # retries links that failed before
         logger.info("Pipeline job: cycle completed.")
     except Exception:  # pragma: no cover
@@ -804,7 +851,12 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db = _db(context)
         n_new = await run_ingestion(db)
         await run_embedding(db, _embedder(context), bd[KEY_SETTINGS])
-        n_cur = await run_curation(db, bd[KEY_CURATOR])
+        n_cur = await run_curation(
+            db, bd[KEY_CURATOR], bd[KEY_SETTINGS],
+            on_budget_exceeded=lambda exc: _notify_budget_exceeded(
+                context.application, exc
+            ),
+        )
         # /run promises a FULL cycle — includes retrying the link queue, same
         # as the automatic cycle (_job_pipeline). This is how you "force" the
         # queue without waiting for the JobQueue's 30 minutes.
@@ -1498,7 +1550,12 @@ def build_application(
     app.bot_data[KEY_EMBEDDER] = embedder
     app.bot_data[KEY_ALLOWED] = allowed
     app.bot_data[KEY_USER_MAP] = {}
-    app.bot_data[KEY_CURATOR] = make_curator(settings)
+    # db=... : the SpendGuard uses the `meta` table (persistent source of
+    # truth) instead of just the local file — see make_curator()/SpendGuard
+    # in src/curation/curator.py. `db` isn't connected yet at this point
+    # (connect() only runs in post_init), but that's fine: the SpendGuard's
+    # queries only happen well later, inside _job_pipeline/cmd_run.
+    app.bot_data[KEY_CURATOR] = make_curator(settings, db=db)
     app.bot_data[KEY_SETTINGS] = settings
     app.bot_data[KEY_STEERER] = Steerer(settings)
 

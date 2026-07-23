@@ -1,6 +1,6 @@
 # 🤖 AI News Aggregator
 
-A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitHub/Reddit/X, curates quality with **Claude Haiku 4.5**, delivers **1x/day on Telegram** in 2 buckets (📦 repos / 🗞️ news) with 👍/👎 votes — and even exposes your curated archive to Claude via **MCP**.
+A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitHub/Reddit/X, curates quality with a **swappable LLM curator (DeepSeek by default)**, delivers **1x/day on Telegram** in 2 buckets (📦 repos / 🗞️ news) with 👍/👎 votes — and even exposes your curated archive to Claude via **MCP**.
 
 > **Open-source template.** Each person spins up their own copy: their bot, their database, their data. Nothing is shared between instances.
 
@@ -12,7 +12,8 @@ A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitH
 
 - **📦 / 🗞️ Morning digest 1x/day.** The digest arrives **once a day, at a fixed time** (`DIGEST_HOUR`/`DIGEST_TZ`, via `run_daily`) — a little morning "newspaper," not an "every-24h" blast. It comes split into **repos** (GitHub) and **news** (Reddit + X), each ranked within itself — no mixing apples and oranges. Delivery only includes posts published in the last **30 days** (`DELIVERY_MAX_AGE_DAYS`).
 - **🏃 `/run` on demand.** Runs a **full cycle now** — ingest → embed → curate → deliver — without waiting for the digest time. It has a lock so two cycles don't run at once.
-- **🧠 Curation via Claude Haiku 4.5.** An **APPLIED-AI** persona (tools, capabilities, techniques, useful news for someone who USES AI — enemy #1 is **AI Slop**). Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to keep it cheap. Approve categories: `ai_tools`/`ai_capabilities`/`applied_techniques`/`autonomous_agents`/`ai_industry`; rejects: `ai_slop`/`low_signal`/`research_only`/`corporate_hype`/`basic_tutorial`/`off_topic`. **Concrete substance survives a hype tone** (a number/release/event approves; rumor/leak/hot-take is `ai_slop`). The **card summary comes out in English**. Active `/focus` topics loosen the bar. A `SpendGuard` (accurate cost estimate, with the cache discount) pauses curation at the monthly cap. **Swappable provider** via `CURATOR_PROVIDER` (`anthropic` | `kimi` | `deepseek` — DeepSeek is ~10x cheaper for classification, with automatic prompt caching).
+- **🧠 Curation via a swappable LLM.** An **APPLIED-AI** persona (tools, capabilities, techniques, useful news for someone who USES AI — enemy #1 is **AI Slop**). Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via structured output, with the rubric cached to keep it cheap. Approve categories: `ai_tools`/`ai_capabilities`/`applied_techniques`/`autonomous_agents`/`ai_industry`; rejects: `ai_slop`/`low_signal`/`research_only`/`corporate_hype`/`basic_tutorial`/`off_topic`. **Concrete substance survives a hype tone** (a number/release/event approves; rumor/leak/hot-take is `ai_slop`). The **card summary comes out in English**. Active `/focus` topics loosen the bar. **Swappable provider** via `CURATOR_PROVIDER` — **`deepseek` (default, cheapest, ~10x less than Haiku with automatic prompt caching)**, `anthropic` (Claude Haiku 4.5) or `kimi` (Moonshot). `ANTHROPIC_API_KEY` is **always required** even on the DeepSeek/Kimi path — the steerer (chat intent) stays on Anthropic regardless of the curator provider.
+- **💰 Two-layer cost control.** A `SpendGuard` (accurate cost estimate, with the cache discount) pauses curation once the **monthly** cap (`CURATOR_MONTHLY_BUDGET_USD`) is hit — persisted in the DB `meta` table so it survives Railway's ephemeral disk (a local-file-only counter would reset on every deploy and never actually fire). A second, independent **per-cycle** cap (`CURATION_MAX_PER_CYCLE`, default 150) keeps a big backlog (e.g. after 24h of broken ingestion) from being judged all at once — it dilutes across several ~30min cycles instead. The first time in a month the budget pauses curation, the bot **DMs every authorized user on Telegram** (at most once a month) so it never fails silently.
 - **👍 / 👎 with PER-BUCKET affinity.** Your votes train the ranking, and affinity is **separated per bucket**: what you like in repos doesn't interfere with what shows up in news. Affinity only **ranks**, it never hides.
 - **🎯 `/focus` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — broadening the search on **X** (Latest + Top), on **Reddit** (top of the day/week/month + hot), and on **GitHub**. And more: the **curator now listens to the focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
 - **🔎 Conversational recall & `/search`.** Chat recall distinguishes **the polarity of your question**: if you ask about what you **voted** on ("did I like something about XPTO?"), the bot searches your 👍/👎; but a **general** question ("any news about XPTO?") searches the **whole archive** — anything good that passed curation, whether you voted on it or not, with ❤️ marking what you liked. `/search` does semantic search and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — so you can ask in PT-BR.
@@ -102,7 +103,7 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
 | **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/focus` (repos) topics enter as extra queries. `GITHUB_TOKEN` optional. Also exports `fetch_repo(url)`, used by the bot to read a single pasted github.com link via the same REST API. |
 | **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free mode via cookies): `user-posts` and `search`, both `--json`. `/focus` (news) topics broaden the search (Latest + Top). Also exports `fetch_tweet(url)`, used by the bot to read a single pasted x.com/twitter.com link (`twitter tweet <url> --json`) since Jina Reader 403s on that domain. |
 | **Source interface** | `src/ingestion/base.py` | `IngestionSource` ABC: every source implements `async fetch() -> list[IngestedPost]`. Dedup is the database's job. |
-| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi; `deepseek` → `deepseek-v4-flash`, ~10x cheaper, automatic prompt caching, thinking disabled). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, English summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
+| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings, db=db)` picks the provider by `CURATOR_PROVIDER` (`deepseek` default → `deepseek-v4-flash`, ~10x cheaper, automatic prompt caching, thinking disabled; `anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, English summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists monthly spend in the DB `meta` table (file fallback) and raises `BudgetExceeded`; `run_curation` also enforces a per-cycle cap (`CURATION_MAX_PER_CYCLE`). |
 | **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/status/capacity/other) via Haiku. `steer` → directives for `/focus` (with an optional `quota`); `recall` → search (polarity `any` falls back to the whole archive, `liked`/`disliked` to votes); `balance` → new×relevant mix (`balance_reset` to default); `status` → QUERIES the state (focus/mix); `capacity` → resizes a bucket's per-day cap. |
 | **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml`, and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. Also owns the `RERANK_PROFILE` default (generic placeholder — write your own) and `QUERY_EMBEDDING_MODEL` (defaults to `EMBEDDING_MODEL`). |
 | **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. Includes `hybrid_recall` (vector+FTS RRF fusion) and the pasted-link retry queue (`posts_needing_fetch`/`resolve_fetched_post`/`get_post_by_source`). |
@@ -111,7 +112,7 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
 | **Hybrid two-stage search** | `src/common/recall.py` | `semantic_recall`: broad candidate recall — hybrid vector+FTS (`db.hybrid_recall`) once `db/migrations/2026-07-22-hybrid-fts.sql` is applied, else pure vector (`search_pool`) — → rerank (cut by `RERANK_MIN_SCORE`). Used by `/search`, chat and MCP. |
 | **MCP server** | `src/mcp_server/server.py` | FastMCP (stdio) that exposes the archive to Claude: `search_archive`, `recall_votes`, `see_focus`. |
 | **SQL schema** | `db/schema.sql` | Postgres 15+/pgvector DDL: `users`, `posts` (shared pool), `deliveries`, `votes`, `focus`. HNSW index, `updated_at` triggers. |
-| **SQL migrations** | `db/migrations/` | Optional, manually-applied changes on top of `schema.sql`. Currently: `2026-07-22-hybrid-fts.sql` (adds `posts.fts` + GIN index for hybrid search). The app works fine before you apply it — see the search section above. |
+| **SQL migrations** | `db/migrations/` | Optional, manually-applied changes on top of `schema.sql`. Currently: `2026-07-22-hybrid-fts.sql` (adds `posts.fts` + GIN index for hybrid search) and `2026-07-23-meta-kv.sql` (generic `meta` key/value table — persists the curator's monthly spend across Railway deploys). The app works fine before you apply either — see the notes below. |
 | **config/sources.yaml** | `config/sources.yaml` | Sources per user (multi-tenant). The bot's allowlist is derived from here. |
 
 ---
@@ -150,11 +151,20 @@ psql "$DATABASE_URL" -f db/migrations/2026-07-22-hybrid-fts.sql
 
 > ⚠️ **Two Supabase gotchas for this one:**
 > - It's a `GENERATED ALWAYS AS ... STORED` column, so Postgres **rewrites the whole `posts` table** at ALTER TABLE time. Fine in seconds on a small personal archive; on a large one, apply it against the **direct** (non-pooled) connection string and run `SET statement_timeout = 0;` first in that session, so the pooler's default timeout doesn't kill it mid-rewrite.
+
 > - That's unrelated to the app's own `statement_cache_size=0` on the asyncpg pool (`src/common/db.py`) — that one exists for every regular query, to stay compatible with Supabase's pgbouncer/Supavisor **transaction-mode** pooler, and is already handled for you; you don't need to do anything about it.
+
+**Optional but recommended: persistent spend-cap migration.** `db/migrations/2026-07-23-meta-kv.sql` creates a generic `meta` key/value table, used by the curator's `SpendGuard` to persist the monthly spend (`CURATOR_MONTHLY_BUDGET_USD`) in the **database** instead of only a local file. This matters specifically for Railway: its disk is **ephemeral** (every deploy resets it), so a file-only counter never actually protects your budget in production. It's **not required to run the app** — until applied, `SpendGuard` falls back to the local file automatically (1 log warning, nothing breaks). Apply it whenever you're ready:
+
+```bash
+psql "$DATABASE_URL" -f db/migrations/2026-07-23-meta-kv.sql
+```
+
+> Both migrations are idempotent-safe to run once each — apply every file in `db/migrations/` after `db/schema.sql` when you set up a new database (or when deploying to Railway for the first time), in addition to `schema.sql` itself.
 
 ### 3. Anthropic and Voyage keys
 
-- **Anthropic** → `ANTHROPIC_API_KEY` (Haiku 4.5 curator + steerer). At [console.anthropic.com](https://console.anthropic.com/). The **curator is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi` | `deepseek`); for `kimi` fill in `MOONSHOT_API_KEY`/`MOONSHOT_BASE_URL`/`KIMI_MODEL`, for `deepseek` fill in `DEEPSEEK_API_KEY` (at [platform.deepseek.com](https://platform.deepseek.com/)) — the cheapest option for classification. The steerer stays on Anthropic.
+- **Anthropic** → `ANTHROPIC_API_KEY`. **Always required**, even though the curator defaults to DeepSeek: it powers the steerer (chat intent) regardless of `CURATOR_PROVIDER`, and it's also the curator itself if you set `CURATOR_PROVIDER=anthropic`. At [console.anthropic.com](https://console.anthropic.com/). The **curator is swappable** via `CURATOR_PROVIDER` — **`deepseek`** (default, shipped in `.env.example`; fill in `DEEPSEEK_API_KEY` at [platform.deepseek.com](https://platform.deepseek.com/), the cheapest option for classification), `anthropic` (Haiku 4.5, uses the key above), or `kimi` (fill in `MOONSHOT_API_KEY`/`MOONSHOT_BASE_URL`/`KIMI_MODEL`).
 - **Voyage AI** → `VOYAGE_API_KEY` (embeddings). At [voyageai.com](https://www.voyageai.com/). Generous free tier.
 
 ### 4. Telegram bot
@@ -213,19 +223,21 @@ users:
 Then fill in `.env` (the keys from steps 3–5 + the `DATABASE_URL` from step 2):
 
 ```dotenv
+# Curator provider: deepseek (default, cheapest) | anthropic | kimi
+CURATOR_PROVIDER=deepseek
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+# Required regardless of CURATOR_PROVIDER — powers the steerer (chat intent):
 ANTHROPIC_API_KEY=
 CURATOR_MODEL=claude-haiku-4-5
 CURATOR_MONTHLY_BUDGET_USD=8
-# Curator provider: anthropic (default, Haiku above) | kimi | deepseek
-CURATOR_PROVIDER=anthropic
+# Per-cycle cap: a big backlog dilutes across cycles instead of one big bill
+CURATION_MAX_PER_CYCLE=150
 # Only if CURATOR_PROVIDER=kimi (OpenAI-compatible API):
 MOONSHOT_API_KEY=
 MOONSHOT_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
-# Only if CURATOR_PROVIDER=deepseek (~10x cheaper, automatic caching):
-DEEPSEEK_API_KEY=
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
 VOYAGE_API_KEY=
 EMBEDDING_MODEL=voyage-4-lite
 # Optional: bigger encoder for the search QUESTION only (same voyage-4 vector space)
@@ -284,6 +296,7 @@ The project already comes with a `Procfile` and `railway.json` (NIXPACKS, `resta
 - **Start command:** `python -m src.bot.bot`
 - Configure the same variables from `.env` (steps 2–5) as *environment variables* in the Railway dashboard. **Never** commit `.env`.
 - Railway builds **from git**: `config/sources.yaml` (and `seeds.yaml`, if you're going to run the seed there) must be **committed in your private deploy repository** — a normal commit, or `git add -f` if you've gitignored those configs (see the note in step 6).
+- Make sure `db/schema.sql` **and** every file in `db/migrations/` have been applied to your Supabase database (step 2) — they're idempotent-safe to run once each, and Railway's ephemeral disk is exactly why the `2026-07-23-meta-kv.sql` migration matters for the spend cap to actually persist in production.
 
 📖 **Full step-by-step in [`DEPLOY.md`](DEPLOY.md)**: bringing up the **single service** `bot` (always-on, with pipeline + delivery via the internal JobQueue), environment variables, the one-off seed, and validation.
 
@@ -311,7 +324,7 @@ Runs comfortably at **~$0–10/month**, leaning on free tiers:
 | --- | --- | --- |
 | **Supabase** | Free (Postgres + pgvector) | ~500MB; the schema has a retention note pruning `raw_text` from old rejected items. |
 | **Voyage AI** | Free tier | `voyage-4-lite`, generous free tier. |
-| **Curator (Haiku 4.5, Kimi or DeepSeek)** | Paid, with a cap | Provider swappable via `CURATOR_PROVIDER` (`anthropic` | `kimi` | `deepseek`; DeepSeek ≈ a tenth of the cost). `SpendGuard` + `CURATOR_MONTHLY_BUDGET_USD` (default **$8**) + prompt caching of the rubric. Curation **pauses** when the cap is exceeded. |
+| **Curator (DeepSeek, Haiku 4.5, or Kimi)** | Paid, with a cap | Provider swappable via `CURATOR_PROVIDER` (`deepseek` default, ≈ a tenth of Haiku's cost | `anthropic` | `kimi`). Two-layer cost control: a **monthly** `SpendGuard` (`CURATOR_MONTHLY_BUDGET_USD`, default **$8**, persisted in the DB `meta` table) + a **per-cycle** cap (`CURATION_MAX_PER_CYCLE`, default 150), plus prompt caching of the rubric. Curation **pauses** when the monthly cap is exceeded, and the bot **alerts you on Telegram** the first time that happens each month. |
 | **GitHub / Reddit / X** | Free | Public Search API, RSS feed, and twitter-cli via cookie. |
 | **Railway** | Usage-based | Always-on process. |
 
@@ -358,7 +371,7 @@ src/
     github_source.py      # Search API + README (+ focus queries); fetch_repo() for pasted links
     x_source.py           # twitter-cli via cookies (Latest + Top of focus); fetch_tweet() for pasted links
   curation/
-    curator.py            # swappable curator (CURATOR_PROVIDER) + SpendGuard (Verdict, English summary)
+    curator.py            # swappable curator (CURATOR_PROVIDER, deepseek default) + SpendGuard (Verdict, English summary)
     steering.py           # chat → ChatIntent (steer/recall/balance/status/capacity) + translate_to_en for /search
   common/
     config.py             # .env + sources.yaml + seeds.yaml (incl. RERANK_PROFILE, QUERY_EMBEDDING_MODEL)
