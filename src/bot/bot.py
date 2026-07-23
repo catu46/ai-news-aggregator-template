@@ -46,6 +46,8 @@ from ..common.models import IngestedPost
 from ..common.recall import semantic_recall
 from ..curation.curator import make_curator
 from ..curation.steering import Steerer
+from ..ingestion.github_source import fetch_repo
+from ..ingestion.x_source import fetch_tweet
 from ..pipeline import run_curation, run_embedding, run_ingestion
 
 logger = logging.getLogger(__name__)
@@ -135,8 +137,17 @@ DIGEST_SIZE_MAX = 40
 # Page reader (clean markdown, no auth) for the "paste a link" feature.
 JINA_BASE = "https://r.jina.ai/"
 URL_RE = re.compile(r"https?://[^\s]+")
+# Tweet link: Jina Reader 403s on x.com/twitter.com (anti-abuse block) -> those
+# links use twitter-cli (fetch_tweet) instead of Jina.
+X_LINK_RE = re.compile(r"^https?://(?:www\.)?(?:x\.com|twitter\.com)/", re.IGNORECASE)
+# Repo link: Jina sometimes chokes/rate-limits on github.com -> try the REST API
+# (fetch_repo) first; unlike X, here Jina still works as a 2nd option (usually
+# succeeds), only THEN falling back to the retry queue.
+GITHUB_LINK_RE = re.compile(r"^https?://(?:www\.)?github\.com/", re.IGNORECASE)
 # Char limit stored/embedded from a manually saved link.
 MANUAL_MAX_CHARS = 8000
+# Retry queue: how many pending links the pipeline job retries per cycle.
+LINK_RETRY_LIMIT = 10
 
 # Keys used in application.bot_data (avoids loose strings throughout the code).
 KEY_DB = "db"
@@ -534,7 +545,12 @@ async def _deliver_bucket(
     The popularity/recency weights are LEARNED from your votes (bounded + capped so
     semantic stays dominant). Affinity here only RANKS (👍 rises, 👎 sinks).
     """
-    likes, dislikes = await db.vote_counts(user_id, platforms=platforms)
+    # Votes on pasted links (origin='manual') also count toward affinity: it's
+    # ACTIVE curation (you chose to save that), a signal as good as a 👍 on a
+    # card — but only HERE (ranking); 'manual' NEVER enters the digest's
+    # candidates (the `platforms`-only filter in deliver_pending is unchanged).
+    aff_platforms = list(platforms) + ["manual"]
+    likes, dislikes = await db.vote_counts(user_id, platforms=aff_platforms)
     affinity_on = (likes + dislikes) >= MIN_VOTES_FOR_AFFINITY
     focuses = await db.active_focus(user_id, bucket_key)
 
@@ -552,7 +568,7 @@ async def _deliver_bucket(
             if affinity_on:
                 try:
                     neighbors = await db.nearest_votes(
-                        user_id, emb, k=5, platforms=platforms
+                        user_id, emb, k=5, platforms=aff_platforms
                     )
                 except Exception:  # pragma: no cover
                     neighbors = []
@@ -658,6 +674,62 @@ async def _job_deliver(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("Delivery job failed.")
 
 
+async def _retry_pending_links(app: Application) -> None:
+    """Retry queue: retries pasted links whose 1st read failed
+    (metadata.needs_fetch=true). On success: writes raw_text, embeds, records
+    the +1 vote again (active curation still holds) and notifies the owner via
+    Telegram. On another failure: stays quiet, tries again next pipeline cycle.
+    """
+    db: Database = app.bot_data[KEY_DB]
+    embedder: Embedder = app.bot_data[KEY_EMBEDDER]
+    cache: dict[int, int] = app.bot_data[KEY_USER_MAP]
+
+    try:
+        pending = await db.posts_needing_fetch(limit=LINK_RETRY_LIMIT)
+    except Exception:  # pragma: no cover
+        logger.exception("Failed to fetch the link retry queue.")
+        return
+
+    for row in pending:
+        post_id = row["id"]
+        url = row["source_url"]
+        meta = dict(row["metadata"] or {})
+        retry_user_id = meta.get("retry_user_id")
+        try:
+            content, title = await _read_link(url)
+            content = (content or "").strip()[:MANUAL_MAX_CHARS]
+            if not content:
+                continue  # empty link again -> try next cycle
+        except Exception:
+            continue  # failed again -> stay quiet, try next cycle
+
+        new_meta = {"via": "telegram_link", "title": title}
+        try:
+            await db.resolve_fetched_post(post_id, content, new_meta)
+            vectors = await embedder.embed_documents([content])
+            await db.set_embedding(post_id, vectors[0], embedder.model)
+            if retry_user_id is not None:
+                await db.record_vote(int(retry_user_id), post_id, vote=1, origin="manual")
+        except Exception:  # pragma: no cover
+            logger.exception("Failed to resolve retry-queue link (post_id=%s)", post_id)
+            continue
+
+        # Notify the link's original owner (maps internal user_id -> telegram
+        # chat id via the same cache deliver_pending/post_init already maintain).
+        if retry_user_id is not None:
+            telegram_user_id = next(
+                (tg for tg, uid in cache.items() if uid == int(retry_user_id)), None
+            )
+            if telegram_user_id is not None:
+                try:
+                    await app.bot.send_message(
+                        chat_id=telegram_user_id,
+                        text=f"✅ I could read that link now: {title or url}",
+                    )
+                except Exception:  # pragma: no cover
+                    logger.exception("Failed to notify link retry (post_id=%s)", post_id)
+
+
 async def _job_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
     """JobQueue callback: runs the pipeline (ingest -> embed -> curate) in the bot.
 
@@ -673,6 +745,7 @@ async def _job_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
             app.bot_data[KEY_SETTINGS],
         )
         await run_curation(app.bot_data[KEY_DB], app.bot_data[KEY_CURATOR])
+        await _retry_pending_links(app)  # retries links that failed before
         logger.info("Pipeline job: cycle completed.")
     except Exception:  # pragma: no cover
         logger.exception("Pipeline job failed.")
@@ -732,6 +805,10 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         n_new = await run_ingestion(db)
         await run_embedding(db, _embedder(context), bd[KEY_SETTINGS])
         n_cur = await run_curation(db, bd[KEY_CURATOR])
+        # /run promises a FULL cycle — includes retrying the link queue, same
+        # as the automatic cycle (_job_pipeline). This is how you "force" the
+        # queue without waiting for the JobQueue's 30 minutes.
+        await _retry_pending_links(context.application)
         n_sent = await deliver_pending(context.application)
     except Exception:  # pragma: no cover
         logger.exception("/run failed")
@@ -1200,22 +1277,80 @@ async def _do_recall(
     )
 
 
+async def _read_link(url: str) -> tuple[str, str | None]:
+    """Routes the reading of a pasted link (used by both _save_link and the
+    retry queue in _retry_pending_links, so the logic isn't duplicated):
+      - x.com/twitter.com -> twitter-cli (Jina 403s there, no fallback);
+      - github.com -> REST API first; on failure (malformed repo, gist,
+        rate-limit...) falls back to Jina as a 2nd option (Jina usually works there);
+      - everything else -> Jina directly.
+    Propagates the exception if every applicable option fails.
+    """
+    if X_LINK_RE.match(url):
+        return await fetch_tweet(url)
+    if GITHUB_LINK_RE.match(url):
+        try:
+            return await fetch_repo(url)
+        except Exception:
+            logger.info("fetch_repo failed for %s, falling back to Jina", url)
+            return await _fetch_readable(url)
+    return await _fetch_readable(url)
+
+
+async def _queue_failed_link(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, user_id: int
+) -> None:
+    """Reading failed: instead of discarding it, stores the post with
+    raw_text=None + metadata.needs_fetch=True and leaves it for the pipeline job
+    to retry later (`_retry_pending_links`). If the link was already queued
+    (upsert -> None), just says it's already pending instead of re-queuing."""
+    db = _db(context)
+    post = IngestedPost(
+        source_platform="manual",
+        source_id=url,
+        source_url=url,
+        raw_text=None,
+        metadata={"via": "telegram_link", "needs_fetch": True, "retry_user_id": user_id},
+    )
+    try:
+        post_id = await db.upsert_post(post)
+        if post_id is None:
+            existing = await db.get_post_by_source("manual", url)
+            if existing is not None and (existing["metadata"] or {}).get("needs_fetch"):
+                await update.effective_message.reply_text(
+                    "That link is already queued — I'll try again soon. 🔁"
+                )
+            else:
+                await update.effective_message.reply_text("That link was already in your archive. 👍")
+            return
+    except Exception:  # pragma: no cover
+        logger.exception("Failed to queue link %s for retry", url)
+        await update.effective_message.reply_text("I couldn't read that link. 😕")
+        return
+
+    await update.effective_message.reply_text(
+        "Couldn't read it right now — saved it and I'll try again. 🔁"
+    )
+
+
 async def _save_link(
     update: Update, context: ContextTypes.DEFAULT_TYPE, url: str
 ) -> None:
-    """Reads a URL via Jina, embeds it and stores it as a 'manual' post + 👍.
+    """Reads a URL (Jina, or twitter-cli for x.com/twitter.com), embeds it and
+    stores it as a 'manual' post + 👍.
 
     Active curation: you save something without waiting for a card. The item enters the
-    archive (origin='manual', vote +1) and starts showing up in /search.
+    archive (origin='manual', vote +1) and starts showing up in /search. If the
+    read fails, it isn't discarded: it enters the retry queue (`_queue_failed_link`).
     """
     user_id = await _resolve_user_id(context, update.effective_user.id)
     await update.effective_message.reply_text("🔗 Reading and saving the link…")
 
     try:
-        content, title = await _fetch_readable(url)
+        content, title = await _read_link(url)
     except Exception:  # pragma: no cover
         logger.exception("Failed to read link %s", url)
-        await update.effective_message.reply_text("I couldn't read that link. 😕")
+        await _queue_failed_link(update, context, url, user_id)
         return
 
     content = (content or "").strip()[:MANUAL_MAX_CHARS]

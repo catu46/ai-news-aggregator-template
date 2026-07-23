@@ -40,6 +40,72 @@ def _resolve_twitter_bin() -> str:
     return "twitter"
 
 
+def _twitter_env(auth_token: str | None = None, ct0: str | None = None) -> dict[str, str]:
+    """Env for the `twitter` subprocess: starts from os.environ (where .env/Railway
+    usually already has TWITTER_AUTH_TOKEN/TWITTER_CT0) and injects explicit
+    overrides on top when given (e.g. tokens from Settings, not the current
+    process). Shared by XSource._env and fetch_tweet (a link pasted into the bot)."""
+    env = dict(os.environ)
+    if auth_token:
+        env["TWITTER_AUTH_TOKEN"] = auth_token
+    if ct0:
+        env["TWITTER_CT0"] = ct0
+    return env
+
+
+async def fetch_tweet(url: str, *, timeout: float = 30.0) -> tuple[str, str | None]:
+    """Reads a single tweet via `twitter tweet <url> --json` — used when the owner
+    pastes an x.com/twitter.com link into the bot (Jina Reader 403s there).
+
+    `twitter tweet <url> --json` returns the same {ok, data:[...]} shape as
+    user-posts/search; data[0] is the requested tweet (the rest are replies).
+    Reuses XSource._to_post to parse the same fields (author/metrics/quoted...).
+
+    Returns (full_text, title). Title = "@author: first ~80 chars".
+    Raises if the CLI fails or the list comes back empty — the caller decides
+    what to do (e.g. queue for retry). stderr usually carries a harmless
+    WARNING ("Failed to init ClientTransaction") — ignored on purpose.
+    """
+    bin_path = _resolve_twitter_bin()
+    cmd = [bin_path, "tweet", url, "--json"]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_twitter_env(),
+    )
+    try:
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"twitter tweet: timed out reading {url}")
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"twitter tweet exited with code {proc.returncode} for {url}")
+
+    payload = json.loads(out.decode("utf-8"))
+    if isinstance(payload, list):          # CLI already returned the raw list
+        data = payload
+    elif isinstance(payload, dict):        # standard {ok, data:[...]} shape
+        if not payload.get("ok", True):
+            raise RuntimeError(f"twitter tweet returned ok=false for {url}")
+        data = payload.get("data") or []
+    else:
+        data = []
+    if not data:
+        raise RuntimeError(f"twitter tweet returned no data for {url}")
+
+    post = XSource._to_post(data[0])
+    if post is None:
+        raise RuntimeError(f"twitter tweet: payload with no id for {url}")
+
+    author = post.author or "?"
+    text = f"@{author}\n\n{post.raw_text}"
+    title = f"@{author}: {post.raw_text[:80]}"
+    return text, title
+
+
 class XSource(IngestionSource):
     name = "x"
 
@@ -64,12 +130,7 @@ class XSource(IngestionSource):
         self._bin = _resolve_twitter_bin()
 
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        if self._auth_token:
-            env["TWITTER_AUTH_TOKEN"] = self._auth_token
-        if self._ct0:
-            env["TWITTER_CT0"] = self._ct0
-        return env
+        return _twitter_env(self._auth_token, self._ct0)
 
     async def fetch(self) -> list[IngestedPost]:
         seen: set[str] = set()

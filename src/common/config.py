@@ -28,7 +28,9 @@ class Settings:
     curator_monthly_budget_usd: float
     voyage_api_key: str
     embedding_model: str
+    query_embedding_model: str     # model for embedding THE QUESTION (can be larger; same voyage-4 space)
     rerank_model: str              # Voyage reranker for the 2-stage search
+    rerank_profile: str            # taste instruction embedded in the reranker query (archive search only)
     reddit_user_agent: str
     twitter_auth_token: str | None
     twitter_ct0: str | None
@@ -43,14 +45,35 @@ class Settings:
     digest_tz: str                 # IANA timezone for the delivery hour
 
 
+# Taste profile embedded in the reranker instruction when searching the archive
+# (rerank-2.5 is instruction-following: it accepts a natural-language instruction
+# alongside the query). This is a generic starting point — replace it via
+# RERANK_PROFILE with a couple of sentences describing YOUR own taste (what you
+# want to see more of, what to downrank). English, since the archive is
+# embedded/curated in English.
+_DEFAULT_RERANK_PROFILE = (
+    "The user prefers hands-on, immediately-useful developer content; "
+    "downrank hype and clickbait."
+)
+
+
 def load_settings() -> Settings:
+    embedding_model = _env("EMBEDDING_MODEL", "voyage-4-lite")
     return Settings(
         anthropic_api_key=_env("ANTHROPIC_API_KEY", required=True),
         curator_model=_env("CURATOR_MODEL", "claude-haiku-4-5"),
         curator_monthly_budget_usd=float(_env("CURATOR_MONTHLY_BUDGET_USD", "8")),
         voyage_api_key=_env("VOYAGE_API_KEY", required=True),
-        embedding_model=_env("EMBEDDING_MODEL", "voyage-4-lite"),
+        embedding_model=embedding_model,
+        # Default = same model as the documents (no behavior change until you set
+        # it). To turn on the shared-space larger-query-only trick: set
+        # QUERY_EMBEDDING_MODEL=voyage-4-large. The voyage-4 family
+        # (nano/lite/voyage-4/large) shares the SAME vector space across sizes —
+        # you can swap in a bigger encoder just for the query (few calls)
+        # without re-embedding the whole archive.
+        query_embedding_model=_env("QUERY_EMBEDDING_MODEL", embedding_model),
         rerank_model=_env("RERANK_MODEL", "rerank-2.5"),
+        rerank_profile=_env("RERANK_PROFILE", _DEFAULT_RERANK_PROFILE),
         reddit_user_agent=_env(
             "REDDIT_USER_AGENT",
             "ai-news-aggregator/1.0 (personal, non-commercial)",

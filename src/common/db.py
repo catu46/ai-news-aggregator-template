@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -71,21 +72,66 @@ class Database:
 
     # ---------------------------------------------------------------- posts
     async def upsert_post(self, p: IngestedPost) -> int | None:
-        """Inserts if new; returns the id, or None if it already existed (dedup)."""
+        """Inserts if new; returns the id, or None if it already existed (dedup).
+
+        raw_text may come in as None (a pasted link's retry queue, when the 1st
+        read failed); in that case raw_text_pruned_at is set to now() to satisfy
+        the CHECK posts_prune_consistency (raw_text NULL requires pruned_at set).
+        pruned_at is computed HERE, in Python — not in a SQL CASE reusing the
+        same placeholder, which leaves the parameter type ambiguous for Postgres
+        to prepare (AmbiguousParameterError).
+        """
+        pruned_at = None if p.raw_text is not None else datetime.now(timezone.utc)
         async with self.pool.acquire() as c:
             row = await c.fetchrow(
                 """
                 INSERT INTO posts
                     (source_platform, source_id, source_url, author,
-                     published_at, raw_text, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     published_at, raw_text, raw_text_pruned_at, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (source_platform, source_id) DO NOTHING
                 RETURNING id
                 """,
                 p.source_platform, p.source_id, p.source_url, p.author,
-                p.published_at, p.raw_text, p.metadata,
+                p.published_at, p.raw_text, pruned_at, p.metadata,
             )
             return row["id"] if row else None
+
+    async def get_post_by_source(
+        self, source_platform: str, source_id: str
+    ) -> asyncpg.Record | None:
+        """Looks up a post by (source_platform, source_id) — used by the pasted-link
+        retry queue, to check whether a repeated link is already pending."""
+        async with self.pool.acquire() as c:
+            return await c.fetchrow(
+                "SELECT id, raw_text, metadata FROM posts "
+                "WHERE source_platform = $1 AND source_id = $2",
+                source_platform, source_id,
+            )
+
+    async def posts_needing_fetch(self, limit: int = 10) -> list[asyncpg.Record]:
+        """Pasted links whose 1st read failed (metadata.needs_fetch=true) and
+        are still waiting for the pipeline job to retry them."""
+        async with self.pool.acquire() as c:
+            return await c.fetch(
+                "SELECT id, source_url, metadata FROM posts "
+                "WHERE metadata->>'needs_fetch' = 'true' "
+                "ORDER BY ingested_at LIMIT $1",
+                limit,
+            )
+
+    async def resolve_fetched_post(
+        self, post_id: int, raw_text: str, metadata: dict
+    ) -> None:
+        """Resolves a post from the retry queue: writes the text that was read
+        (raw_text_pruned_at goes back to NULL) and replaces the metadata (without
+        the needs_fetch flag)."""
+        async with self.pool.acquire() as c:
+            await c.execute(
+                "UPDATE posts SET raw_text = $2, raw_text_pruned_at = NULL, "
+                "metadata = $3 WHERE id = $1",
+                post_id, raw_text, metadata,
+            )
 
     async def posts_pending_embedding(self, limit: int = 100) -> list[asyncpg.Record]:
         async with self.pool.acquire() as c:
@@ -433,6 +479,84 @@ class Database:
                 )
         # relevance floor: discards off-topic (high distance)
         return [r for r in rows if float(r["distance"]) < max_dist]
+
+    async def hybrid_recall(
+        self, user_id: int, query_text: str, query_embedding, limit: int = 10,
+    ) -> list[asyncpg.Record]:
+        """HYBRID search over the curated archive: RRF fusion (k=60) between
+        vector recall and full-text search (`websearch_to_tsquery`), the
+        well-established pattern (2 ranked CTEs + FULL OUTER JOIN + sum of
+        1/(60+rank)).
+
+        Same scope/filters/columns as `search_pool` (approved + manual + this
+        user's likes) — it's the hybrid sibling, not a method with its own new
+        contract. No `max_dist` floor like `search_pool`: here candidates come
+        from TWO signals (vector + text) and the fine relevance cut is done by
+        the reranker (recall.py), not the raw distance — a text-only match
+        doesn't have a genuinely comparable "distance".
+
+        Requires the generated column `posts.fts` (see
+        db/migrations/2026-07-22-hybrid-fts.sql, NOT applied by default). If the
+        migration hasn't run yet, Postgres raises `UndefinedColumnError` — the
+        caller (`recall.py`) catches this and falls back to the pure vector path
+        (`search_pool`), so it's safe to deploy this code BEFORE applying the
+        migration.
+        """
+        async with self.pool.acquire() as c:
+            async with c.transaction():
+                # same tweak as search_pool: without it the approved/manual/liked
+                # filter discards too many neighbors and vector recall comes back poor.
+                await c.execute("SET LOCAL hnsw.ef_search = 200")
+                rows = await c.fetch(
+                    """
+                    WITH filtered AS (
+                        SELECT p.id, p.source_url, p.author, p.raw_text, p.category,
+                               p.source_platform, p.embedding, p.fts,
+                               EXISTS (
+                                   SELECT 1 FROM votes v
+                                   WHERE v.user_id = $1 AND v.post_id = p.id AND v.vote = 1
+                               ) AS liked
+                        FROM posts p
+                        WHERE p.embedding IS NOT NULL
+                          AND (
+                              p.verdict = 'approved'
+                              OR p.source_platform = 'manual'
+                              OR EXISTS (
+                                  SELECT 1 FROM votes v
+                                  WHERE v.user_id = $1 AND v.post_id = p.id AND v.vote = 1
+                              )
+                          )
+                    ),
+                    vec_ranked AS (
+                        SELECT id, (embedding <=> $2) AS distance,
+                               ROW_NUMBER() OVER (ORDER BY embedding <=> $2) AS rnk
+                        FROM filtered
+                        ORDER BY embedding <=> $2
+                        LIMIT $4
+                    ),
+                    fts_ranked AS (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   ORDER BY ts_rank(fts, websearch_to_tsquery('simple', $3)) DESC
+                               ) AS rnk
+                        FROM filtered
+                        WHERE fts @@ websearch_to_tsquery('simple', $3)
+                        LIMIT $4
+                    )
+                    SELECT f.id, f.source_url, f.author, f.raw_text, f.category,
+                           f.source_platform, f.liked,
+                           COALESCE(v.distance, 1.0) AS distance,
+                           (COALESCE(1.0 / (60 + v.rnk), 0.0)
+                            + COALESCE(1.0 / (60 + t.rnk), 0.0)) AS rrf_score
+                    FROM vec_ranked v
+                    FULL OUTER JOIN fts_ranked t ON v.id = t.id
+                    JOIN filtered f ON f.id = COALESCE(v.id, t.id)
+                    ORDER BY rrf_score DESC
+                    LIMIT $4
+                    """,
+                    user_id, query_embedding, query_text, limit,
+                )
+        return rows
 
     async def recall_voted(
         self, user_id: int, query_embedding, vote: int | None = None,

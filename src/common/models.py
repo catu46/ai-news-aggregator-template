@@ -16,7 +16,9 @@ class IngestedPost:
     source_platform: Literal["reddit", "twitter", "seed", "github", "manual"]
     source_id: str           # platform-native id (dedup key)
     source_url: str
-    raw_text: str
+    # None = "no content yet" (a pasted link's retry queue, when the 1st read
+    # failed); posts_pending_embedding/posts_pending_curation skip these.
+    raw_text: str | None = None
     author: str | None = None
     published_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

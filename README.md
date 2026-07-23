@@ -16,12 +16,14 @@ A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitH
 - **👍 / 👎 with PER-BUCKET affinity.** Your votes train the ranking, and affinity is **separated per bucket**: what you like in repos doesn't interfere with what shows up in news. Affinity only **ranks**, it never hides.
 - **🎯 `/focus` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — broadening the search on **X** (Latest + Top), on **Reddit** (top of the day/week/month + hot), and on **GitHub**. And more: the **curator now listens to the focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
 - **🔎 Conversational recall & `/search`.** Chat recall distinguishes **the polarity of your question**: if you ask about what you **voted** on ("did I like something about XPTO?"), the bot searches your 👍/👎; but a **general** question ("any news about XPTO?") searches the **whole archive** — anything good that passed curation, whether you voted on it or not, with ❤️ marking what you liked. `/search` does semantic search and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — so you can ask in PT-BR.
-- **🎯 Two-stage search (relevance rerank).** In a single-domain archive (all AI), cosine distance alone can't separate relevant from irrelevant. So search has **two stages** (`semantic_recall`): broad vector recall → a **reranker** (Voyage `rerank-2.5`) that reads query+text together and gives the real relevance score. Off-topic is **discarded**; if nothing passes, the bot says **"I found nothing about X"** instead of filling the screen with off-topic. Applies to chat, `/search` and MCP.
+- **🎯 Hybrid search (vector + full-text) with relevance rerank.** In a single-domain archive (all AI), cosine distance alone can't separate relevant from irrelevant. So search has **two stages** (`semantic_recall`): broad **candidate recall** → a **reranker** (Voyage `rerank-2.5`) that reads query+text together and gives the real relevance score. Candidate recall is itself **hybrid**: vector (embedding) + full-text search (Postgres `websearch_to_tsquery`), fused with **RRF** (`db.hybrid_recall`) — catches exact keywords/names the embedding alone can miss. Requires the `db/migrations/2026-07-22-hybrid-fts.sql` migration; until you apply it, the code **falls back automatically** to pure vector recall (`search_pool`), so it's safe to deploy first and migrate later. The reranker query also carries a **taste instruction** (`RERANK_PROFILE`, see below) — off-topic is **discarded**; if nothing passes, the bot says **"I found nothing about X"** instead of filling the screen with off-topic. Applies to chat, `/search` and MCP.
+- **🎛️ `RERANK_PROFILE` — tell the reranker your taste.** rerank-2.5 is instruction-following: the search's reranker (above) can be steered by a couple of sentences of natural-language taste ("prefers hands-on, immediately-useful developer content; downrank hype") appended to every query. The template ships a **generic placeholder** — write your own in `.env` (`RERANK_PROFILE`) once you know what you like.
+- **🚀 `QUERY_EMBEDDING_MODEL` — a bigger encoder just for the question.** The `voyage-4` family (nano/lite/voyage-4/large) shares the **same vector space** across sizes, so the archive can stay on the cheap `voyage-4-lite` while the (much rarer) search queries use a larger, higher-quality encoder — no re-embedding the whole archive. Off by default (same model as the archive); set `QUERY_EMBEDDING_MODEL=voyage-4-large` to turn it on.
 - **♻️ No repeated news.** The bot won't send you the **same story twice** — even from another source or on another day (and even if you liked it). Before delivering, it runs **semantic dedup** (`_dedup_pending`) against everything already delivered; distinct stories still come through. Repos **and** news.
 - **🎚️ Focus quota + digest size.** A `/focus` is a **dial, not a switch**: it occupies up to **N** of the bucket's slots ("up to 6 VC news"), the rest stays normal — so one topic never starves a platform. If you don't give a number, the bot **asks** "how many?". And you can **resize the digest** by speech ("up to 20 news a day").
 - **⚖️ New × relevant rebalancing.** Adjust by speech how much of the digest is **freshness** (newer) vs **relevance** (affinity + focus) — and, beyond the manual adjustment, the bot **auto-balances** by learning from your votes (it raises novelty if you like what's discovered by the freshness slot, lowers it if you reject). It's saved in your settings. Say **"undo that" / "reset"** and the bot **zeroes out the adjustment** for that bucket (or both) and the mix returns to default. **`/mix`** shows the current new×relevant balance of each bucket (marked `default` or `adjusted`).
 - **🔌 MCP server.** Plug your curated archive into Claude Code/Desktop and query it with `search_archive`, `recall_votes`, and `see_focus`.
-- **🔗 Pasted link = 👍.** Paste a URL in the chat: the bot reads the content via Jina Reader and saves it to your archive already as `origin='manual'` with a positive vote.
+- **🔗 Pasted link = 👍, with native readers.** Paste a URL in the chat: the bot reads the content and saves it to your archive as `origin='manual'` with a positive vote, and that vote **counts toward your ranking affinity** too (per-bucket, same as a 👍 on a card). Most links go through **Jina Reader**, but two platforms get a dedicated reader instead: **x.com/twitter.com** links are read via **twitter-cli** (Jina 403s on that domain) and **github.com** links are read via the **GitHub REST API** (description + topics + stars + README), falling back to Jina if that fails. If a link's read fails outright, it isn't dropped: it enters a **retry queue** (`needs_fetch` in `posts.metadata`) that the pipeline job (and `/run`) retries automatically — you get a Telegram message once it succeeds.
 
 ---
 
@@ -94,21 +96,22 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
 
 | Component | Path | Role |
 | --- | --- | --- |
-| **Telegram bot** | `src/bot/bot.py` | Delivery and interface (python-telegram-bot 22.8, long-polling). Locked to an allowlist from `sources.yaml`, delivers the morning digest in 2 buckets (30-day cutoff), records inline votes, commands `/start /feed /run /search /focus /mix`, saves pasted links and routes free chat to steer/recall/balance/status (general recall falls back to the whole archive; "undo that"/"reset" zeroes the mix; "what's in focus?"/"what's the mix?" query the state). Runs the `_job_deliver` (daily, fixed hour via `run_daily`, with auto-balancing) and `_job_pipeline` (30min) jobs. |
+| **Telegram bot** | `src/bot/bot.py` | Delivery and interface (python-telegram-bot 22.8, long-polling). Locked to an allowlist from `sources.yaml`, delivers the morning digest in 2 buckets (30-day cutoff), records inline votes, commands `/start /feed /run /search /focus /mix`, saves pasted links (native readers for x.com/github.com, retry queue for failed reads) and routes free chat to steer/recall/balance/status (general recall falls back to the whole archive; "undo that"/"reset" zeroes the mix; "what's in focus?"/"what's the mix?" query the state). Runs the `_job_deliver` (daily, fixed hour via `run_daily`, with auto-balancing) and `_job_pipeline` (30min, also drains the link retry queue) jobs. |
 | **Pipeline runner** | `src/pipeline.py` | One `ingest → embed → curate` cycle, idempotent. Runs standalone (`python -m src.pipeline`), via the bot's job, or via `/run`. The active `/focus` topics enter ingestion (Reddit/X/GitHub) **and** curation (as *interests*). It does **not** deliver to Telegram. |
 | **Reddit source** | `src/ingestion/reddit_source.py` | Collects via the **public RSS/Atom feed** of the fixed subreddits; `/focus` (news) topics broaden the search (top of day/week/month + hot). Parses with feedparser + BeautifulSoup. |
-| **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/focus` (repos) topics enter as extra queries. `GITHUB_TOKEN` optional. |
-| **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free mode via cookies): `user-posts` and `search`, both `--json`. `/focus` (news) topics broaden the search (Latest + Top). |
+| **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/focus` (repos) topics enter as extra queries. `GITHUB_TOKEN` optional. Also exports `fetch_repo(url)`, used by the bot to read a single pasted github.com link via the same REST API. |
+| **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free mode via cookies): `user-posts` and `search`, both `--json`. `/focus` (news) topics broaden the search (Latest + Top). Also exports `fetch_tweet(url)`, used by the bot to read a single pasted x.com/twitter.com link (`twitter tweet <url> --json`) since Jina Reader 403s on that domain. |
 | **Source interface** | `src/ingestion/base.py` | `IngestionSource` ABC: every source implements `async fetch() -> list[IngestedPost]`. Dedup is the database's job. |
 | **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, English summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
 | **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/status/capacity/other) via Haiku. `steer` → directives for `/focus` (with an optional `quota`); `recall` → search (polarity `any` falls back to the whole archive, `liked`/`disliked` to votes); `balance` → new×relevant mix (`balance_reset` to default); `status` → QUERIES the state (focus/mix); `capacity` → resizes a bucket's per-day cap. |
-| **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml`, and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. |
-| **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. |
-| **Data models** | `src/common/models.py` | `IngestedPost` + Pydantic schemas for the Structured Outputs (`Verdict`, `FocusItem`, `ChatIntent`). |
-| **Embedder + reranker (Voyage)** | `src/common/embeddings.py` | Voyage AI wrapper: embeddings (`voyage-4-lite`, 1024-dim, L2-normalized → cosine=dot) + reranker (`rerank-2.5`, `RERANK_MODEL`) for the search's 2nd stage. |
-| **Two-stage search** | `src/common/recall.py` | `semantic_recall`: broad vector recall → rerank (cut by `RERANK_MIN_SCORE`). Used by `/search`, chat and MCP. |
+| **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml`, and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. Also owns the `RERANK_PROFILE` default (generic placeholder — write your own) and `QUERY_EMBEDDING_MODEL` (defaults to `EMBEDDING_MODEL`). |
+| **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. Includes `hybrid_recall` (vector+FTS RRF fusion) and the pasted-link retry queue (`posts_needing_fetch`/`resolve_fetched_post`/`get_post_by_source`). |
+| **Data models** | `src/common/models.py` | `IngestedPost` (`raw_text` is optional — `None` means "queued for retry") + Pydantic schemas for the Structured Outputs (`Verdict`, `FocusItem`, `ChatIntent`). |
+| **Embedder + reranker (Voyage)** | `src/common/embeddings.py` | Voyage AI wrapper: document embeddings (`voyage-4-lite`, 1024-dim, L2-normalized → cosine=dot), a separate query embedding model (`QUERY_EMBEDDING_MODEL`, same voyage-4 vector space so it can be larger) + reranker (`rerank-2.5`, `RERANK_MODEL`, with an optional taste instruction from `RERANK_PROFILE`) for the search's 2nd stage. |
+| **Hybrid two-stage search** | `src/common/recall.py` | `semantic_recall`: broad candidate recall — hybrid vector+FTS (`db.hybrid_recall`) once `db/migrations/2026-07-22-hybrid-fts.sql` is applied, else pure vector (`search_pool`) — → rerank (cut by `RERANK_MIN_SCORE`). Used by `/search`, chat and MCP. |
 | **MCP server** | `src/mcp_server/server.py` | FastMCP (stdio) that exposes the archive to Claude: `search_archive`, `recall_votes`, `see_focus`. |
 | **SQL schema** | `db/schema.sql` | Postgres 15+/pgvector DDL: `users`, `posts` (shared pool), `deliveries`, `votes`, `focus`. HNSW index, `updated_at` triggers. |
+| **SQL migrations** | `db/migrations/` | Optional, manually-applied changes on top of `schema.sql`. Currently: `2026-07-22-hybrid-fts.sql` (adds `posts.fts` + GIN index for hybrid search). The app works fine before you apply it — see the search section above. |
 | **config/sources.yaml** | `config/sources.yaml` | Sources per user (multi-tenant). The bot's allowlist is derived from here. |
 
 ---
@@ -139,6 +142,16 @@ psql "$DATABASE_URL" -f db/schema.sql
 
 > ⚠️ **Starting over from scratch:** `db/reset.sql` drops all the tables that `schema.sql` creates (`focus`, `votes`, `deliveries`, `posts`, `users`) — run it **before** reapplying the schema if you need to wipe it. **It ERASES all data.** Use it only on a throwaway/freshly-created database, never on one that already has your votes.
 
+**Optional: hybrid search migration.** `db/migrations/2026-07-22-hybrid-fts.sql` adds a generated `posts.fts` column + GIN index, turning search from pure-vector into hybrid **vector + full-text** (RRF fusion, `db.hybrid_recall`). It's **not required to run the app** — until you apply it, `semantic_recall` detects the missing column and falls back to pure vector recall automatically (1 log warning, nothing breaks). Apply it whenever you're ready:
+
+```bash
+psql "$DATABASE_URL" -f db/migrations/2026-07-22-hybrid-fts.sql
+```
+
+> ⚠️ **Two Supabase gotchas for this one:**
+> - It's a `GENERATED ALWAYS AS ... STORED` column, so Postgres **rewrites the whole `posts` table** at ALTER TABLE time. Fine in seconds on a small personal archive; on a large one, apply it against the **direct** (non-pooled) connection string and run `SET statement_timeout = 0;` first in that session, so the pooler's default timeout doesn't kill it mid-rewrite.
+> - That's unrelated to the app's own `statement_cache_size=0` on the asyncpg pool (`src/common/db.py`) — that one exists for every regular query, to stay compatible with Supabase's pgbouncer/Supavisor **transaction-mode** pooler, and is already handled for you; you don't need to do anything about it.
+
 ### 3. Anthropic and Voyage keys
 
 - **Anthropic** → `ANTHROPIC_API_KEY` (Haiku 4.5 curator + steerer). At [console.anthropic.com](https://console.anthropic.com/). The **curator is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`); if you're going to use `kimi`, fill in `MOONSHOT_API_KEY`/`MOONSHOT_BASE_URL`/`KIMI_MODEL` instead. The steerer stays on Anthropic.
@@ -158,7 +171,9 @@ The X source uses `twitter-cli` in **free mode via cookies**. Use a **throwaway 
 | `auth_token` | `TWITTER_AUTH_TOKEN` |
 | `ct0` | `TWITTER_CT0` |
 
-> The cookies expire over time — re-extract them when X ingestion stops. Without them, the X source simply runs without auth.
+> The cookies expire over time — re-extract them when X ingestion stops. Without them, the X source simply runs without auth. The same cookies also power reading a **pasted x.com/twitter.com link** (`fetch_tweet`) — Jina Reader 403s on that domain, so without cookies that specific paste-a-link path fails (and queues for retry) even though the rest of the bot works fine.
+
+> `GITHUB_TOKEN` (used for both ingestion and reading a pasted github.com link) only needs **public read access** — a "fine-grained" token at [github.com/settings/tokens](https://github.com/settings/tokens) with no repository access/scopes checked is enough. It's optional either way (10 req/min unauthenticated vs. 30 authenticated for search).
 
 ### 6. Configure sources, seeds, and environment variables
 
@@ -209,6 +224,11 @@ MOONSHOT_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 VOYAGE_API_KEY=
 EMBEDDING_MODEL=voyage-4-lite
+# Optional: bigger encoder for the search QUESTION only (same voyage-4 vector space)
+QUERY_EMBEDDING_MODEL=
+RERANK_MODEL=rerank-2.5
+# Optional: your taste, in a sentence or two — steers the archive-search reranker
+RERANK_PROFILE=
 REDDIT_USER_AGENT=ai-news-aggregator/1.0 (personal, non-commercial)
 GITHUB_TOKEN=
 TWITTER_AUTH_TOKEN=
@@ -313,7 +333,7 @@ After `claude mcp add archive`, Claude starts seeing your curated archive throug
 
 | Tool | What it does |
 | --- | --- |
-| `search_archive` | Semantic search (2 stages: vector → rerank) over the pool of curated posts. |
+| `search_archive` | Semantic search (2 stages: hybrid vector+FTS recall → rerank) over the pool of curated posts. |
 | `recall_votes` | Recall in your 👍/👎 — "what have I already liked about X?" (same 2-stage search). |
 | `see_focus` | Shows the active `/focus` per bucket (`active_focus`). |
 
@@ -331,20 +351,21 @@ src/
   ingestion/
     base.py               # IngestionSource ABC
     reddit_source.py      # fixed subs + focus search (top day/week/month + hot)
-    github_source.py      # Search API + README (+ focus queries)
-    x_source.py           # twitter-cli via cookies (Latest + Top of focus)
+    github_source.py      # Search API + README (+ focus queries); fetch_repo() for pasted links
+    x_source.py           # twitter-cli via cookies (Latest + Top of focus); fetch_tweet() for pasted links
   curation/
     curator.py            # swappable curator (CURATOR_PROVIDER) + SpendGuard (Verdict, English summary)
     steering.py           # chat → ChatIntent (steer/recall/balance/status/capacity) + translate_to_en for /search
   common/
-    config.py             # .env + sources.yaml + seeds.yaml
-    db.py                 # asyncpg + pgvector (scoped by user_id)
-    models.py             # IngestedPost + Pydantic schemas
-    embeddings.py         # Voyage voyage-4-lite + reranker rerank-2.5
-    recall.py             # 2-stage search: vector recall -> rerank
+    config.py             # .env + sources.yaml + seeds.yaml (incl. RERANK_PROFILE, QUERY_EMBEDDING_MODEL)
+    db.py                 # asyncpg + pgvector (scoped by user_id); hybrid_recall + link retry queue
+    models.py             # IngestedPost (raw_text optional) + Pydantic schemas
+    embeddings.py         # Voyage: doc embeddings, query embeddings, profile-aware reranker
+    recall.py             # 2-stage search: hybrid (vector+FTS) or vector-only recall -> rerank
   mcp_server/server.py    # FastMCP (search_archive / recall_votes / see_focus)
 db/schema.sql             # Postgres 15+/pgvector DDL
 db/reset.sql              # drops the schema's tables (ERASES data)
+db/migrations/            # optional, manually-applied changes on top of schema.sql
 config/sources.yaml       # sources per user (personal data, not a secret)
 config/seeds.yaml         # cold-start examples per user (personal data)
 Procfile · railway.json   # Railway deploy (via git)
