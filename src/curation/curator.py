@@ -10,8 +10,9 @@ Architecture
 - `BudgetExceeded`: raised by `classify()` when the estimated monthly spend
   exceeds `settings.curator_monthly_budget_usd`.
 
-Swapping providers is trivial: see `DeepSeekCurator` (commented sketch at the
-end). Just implement `classify()` with the same signature and return a `Verdict`.
+Swapping providers is trivial: see `KimiCurator` and `DeepSeekCurator`
+(alternative impls via OpenAI-style APIs, selectable via CURATOR_PROVIDER).
+Just implement `classify()` with the same signature and return a `Verdict`.
 """
 from __future__ import annotations
 
@@ -247,47 +248,19 @@ class AnthropicCurator(Curator):
 
 
 # ==========================================================================
-# NOTE — second provider behind the SAME interface (sketch).
+# Alternative providers behind the SAME interface.
 # --------------------------------------------------------------------------
-# DeepSeek could be a second impl of `Curator`. Its API is compatible with the
-# OpenAI style; with `response_format`/function-calling for the JSON, you could
-# map the output into the same `Verdict` and return it here.
-# The rest of the pipeline (runner, db.mark_curation) doesn't change — only the
-# injected `Curator` differs. Sketch:
-#
-#   class DeepSeekCurator(Curator):
-#       def __init__(self, settings, *, spend_guard=None, ...):
-#           self._client = openai.AsyncOpenAI(
-#               api_key=..., base_url="https://api.deepseek.com",
-#           )
-#           self._spend = spend_guard or SpendGuard()
-#           ...
-#
-#       async def classify(self, post_text, similarity_signal=None):
-#           if self.is_over_budget():
-#               raise BudgetExceeded(...)
-#           resp = await self._client.chat.completions.create(
-#               model="deepseek-chat",
-#               messages=[
-#                   {"role": "system", "content": RUBRIC},
-#                   {"role": "user", "content": build_user_message(
-#                       post_text, None, None, similarity_signal)},
-#               ],
-#               response_format={"type": "json_object"},
-#               max_tokens=300,
-#           )
-#           # ...accumulate spend using DeepSeek's pricing table...
-#           # ...parse the JSON and validate with Verdict.model_validate_json(...)...
-#           # ...return Verdict or None on failure.
-#
-# The prices and the `usage` reading are provider-specific, but
-# `SpendGuard`/`BudgetExceeded` are reused. This sketch is REALIZED below as
-# `KimiCurator` (Moonshot/Kimi, selectable via CURATOR_PROVIDER).
+# Any OpenAI-style API (chat.completions + JSON mode) fits here: it reuses
+# `RUBRIC`, `SpendGuard` and `BudgetExceeded`; the rest of the pipeline
+# (runner, db.mark_curation) doesn't change — only the injected `Curator`.
+# Implemented: `KimiCurator` (Moonshot) and `DeepSeekCurator` — selectable
+# via CURATOR_PROVIDER=kimi|deepseek (see `make_curator` at the end).
 # ==========================================================================
 
 
-# Output contract for Kimi: it doesn't have Anthropic's `messages.parse`, so we
-# ask for JSON mode + describe the schema and validate with Pydantic in the app.
+# Output contract for OpenAI-style providers (Kimi, DeepSeek): they don't have
+# Anthropic's `messages.parse`, so we ask for JSON mode + describe the schema
+# and validate with Pydantic in the app.
 _KIMI_JSON_CONTRACT = """
 
 =====================================================================
@@ -428,12 +401,149 @@ class KimiCurator(Curator):
         return verdict
 
 
+# deepseek-v4-flash pricing (USD per 1M tokens), verified in the official docs
+# in jul/2026. Prompt caching is AUTOMATIC on DeepSeek (no `cache_control`):
+# the big rubric repeated on every call becomes a cache hit (~50x cheaper).
+_DEEPSEEK_INPUT_HIT = 0.0028 / 1_000_000   # input on cache hit
+_DEEPSEEK_INPUT_MISS = 0.14 / 1_000_000    # input on cache miss
+_DEEPSEEK_OUTPUT = 0.28 / 1_000_000
+
+
+def estimate_deepseek_cost_usd(usage: object) -> float:
+    """Approximate USD of a DeepSeek response, from `usage`.
+
+    DeepSeek exposes `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`
+    directly on usage; if missing (SDK change), tries the OpenAI shape
+    (`prompt_tokens_details.cached_tokens`) and, as a last resort, charges all
+    input at the cache miss price (conservative — overestimates, never under).
+    """
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+    if not hit:
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is not None:
+            hit = int(getattr(details, "cached_tokens", 0) or 0)
+    miss = max(0, prompt - hit)
+    return hit * _DEEPSEEK_INPUT_HIT + miss * _DEEPSEEK_INPUT_MISS + completion * _DEEPSEEK_OUTPUT
+
+
+class DeepSeekCurator(Curator):
+    """Alternative curator via DeepSeek (OpenAI-compatible API).
+
+    Selectable via `CURATOR_PROVIDER=deepseek`. Same recipe as `KimiCurator`:
+    RUBRIC + JSON contract in the system prompt, JSON mode, Pydantic
+    validation (`Verdict`). DeepSeek-specific differences:
+    - `thinking` is ON by default on deepseek-v4-flash — we disable it via
+      `extra_body` (classification doesn't need long reasoning, and thinking
+      tokens are billed as output);
+    - automatic prompt caching (no `cache_control`).
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        spend_guard: SpendGuard | None = None,
+        client: object | None = None,
+        max_tokens: int = 400,
+    ) -> None:
+        import openai  # lazy: only DeepSeek users need the `openai` SDK
+
+        if not settings.deepseek_api_key:
+            raise RuntimeError(
+                "CURATOR_PROVIDER=deepseek, but DEEPSEEK_API_KEY is missing from .env."
+            )
+        self._model = settings.deepseek_model
+        self.model = settings.deepseek_model  # public: the runner reads it via curator_model_of()
+        self._budget_usd = settings.curator_monthly_budget_usd
+        self._max_tokens = max_tokens
+        self._spend = spend_guard or SpendGuard()
+        self._client = client or openai.AsyncOpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+        )
+        # Static system prefix (RUBRIC + JSON contract) -> automatic cache.
+        self._system = RUBRIC + _KIMI_JSON_CONTRACT
+
+    @property
+    def spent_this_month(self) -> float:
+        return self._spend.spent_this_month()
+
+    def is_over_budget(self, budget_usd: float | None = None) -> bool:
+        return self._spend.is_over_budget(
+            self._budget_usd if budget_usd is None else budget_usd
+        )
+
+    async def classify(
+        self, post_text: str, similarity_signal: str | None = None,
+        interests: list[str] | None = None,
+    ) -> Verdict | None:
+        if self.is_over_budget():
+            raise BudgetExceeded(
+                SpendGuard._month_key(), self.spent_this_month, self._budget_usd
+            )
+
+        user_message = build_user_message(
+            raw_text=post_text, author=None, metadata=None,
+            similarity_signal=similarity_signal, interests=interests,
+        )
+        try:
+            resp = await self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                temperature=0.0,  # classification: determinism > creativity
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": self._system},
+                    {"role": "user", "content": user_message},
+                ],
+                # DeepSeek-specific parameter (outside the OpenAI schema) —
+                # without this, v4-flash "thinks" before answering (default
+                # enabled), multiplying output cost and latency for nothing.
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+        except Exception:  # noqa: BLE001 — API/network error -> None (caller marks an error)
+            logger.exception("deepseek: classification call failed")
+            return None
+
+        # ALWAYS account for the spend (tokens were already billed).
+        try:
+            self._spend.add(estimate_deepseek_cost_usd(resp.usage))
+        except Exception:  # noqa: BLE001 — accounting never takes down curation
+            pass
+
+        try:
+            choice = resp.choices[0]
+        except (AttributeError, IndexError):
+            return None
+        if getattr(choice, "finish_reason", None) == "length":
+            return None
+        content = (getattr(choice.message, "content", None) or "").strip()
+        if not content:
+            return None
+
+        try:
+            verdict = Verdict.model_validate_json(content)
+        except Exception:  # noqa: BLE001 — invalid JSON / off-schema
+            logger.warning("deepseek: response did not validate against Verdict")
+            return None
+
+        if not (0.0 <= verdict.confidence <= 1.0):
+            verdict.confidence = max(0.0, min(1.0, verdict.confidence))
+        return verdict
+
+
 def make_curator(settings: Settings, *, spend_guard: SpendGuard | None = None) -> Curator:
     """Curator factory: picks the provider via `settings.curator_provider`.
 
-    Default = Anthropic (Haiku). `CURATOR_PROVIDER=kimi` switches to Kimi without
-    touching the rest of the pipeline (the `Curator` interface is the same).
+    Default = Anthropic (Haiku). `CURATOR_PROVIDER=kimi` or `=deepseek` switches
+    provider without touching the rest of the pipeline (the `Curator` interface
+    is the same).
     """
-    if (settings.curator_provider or "anthropic").lower() == "kimi":
+    provider = (settings.curator_provider or "anthropic").lower()
+    if provider == "kimi":
         return KimiCurator(settings, spend_guard=spend_guard)
+    if provider == "deepseek":
+        return DeepSeekCurator(settings, spend_guard=spend_guard)
     return AnthropicCurator(settings, spend_guard=spend_guard)

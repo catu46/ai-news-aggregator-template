@@ -37,10 +37,13 @@ class Settings:
     telegram_bot_token: str
     database_url: str
     github_token: str | None
-    curator_provider: str          # 'anthropic' (default) | 'kimi'
+    curator_provider: str          # 'anthropic' (default) | 'kimi' | 'deepseek'
     moonshot_api_key: str | None    # if curator_provider='kimi'
     moonshot_base_url: str
     kimi_model: str
+    deepseek_api_key: str | None    # if curator_provider='deepseek'
+    deepseek_base_url: str
+    deepseek_model: str
     digest_hour: int               # local hour of the daily delivery (0-23)
     digest_tz: str                 # IANA timezone for the delivery hour
 
@@ -87,6 +90,11 @@ def load_settings() -> Settings:
         moonshot_api_key=_env("MOONSHOT_API_KEY"),
         moonshot_base_url=_env("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1"),
         kimi_model=_env("KIMI_MODEL", "kimi-k2.6"),
+        deepseek_api_key=_env("DEEPSEEK_API_KEY"),
+        deepseek_base_url=_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        # 'deepseek-v4-flash' is the CURRENT name (jul/2026); the old aliases
+        # 'deepseek-chat'/'deepseek-reasoner' were discontinued on 2026-07-24.
+        deepseek_model=_env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         digest_hour=int(_env("DIGEST_HOUR", "7")),
         digest_tz=_env("DIGEST_TZ", "America/Sao_Paulo"),
     )

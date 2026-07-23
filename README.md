@@ -12,7 +12,7 @@ A personal AI news and repo aggregator, **multi-tenant-ready**: it collects GitH
 
 - **📦 / 🗞️ Morning digest 1x/day.** The digest arrives **once a day, at a fixed time** (`DIGEST_HOUR`/`DIGEST_TZ`, via `run_daily`) — a little morning "newspaper," not an "every-24h" blast. It comes split into **repos** (GitHub) and **news** (Reddit + X), each ranked within itself — no mixing apples and oranges. Delivery only includes posts published in the last **30 days** (`DELIVERY_MAX_AGE_DAYS`).
 - **🏃 `/run` on demand.** Runs a **full cycle now** — ingest → embed → curate → deliver — without waiting for the digest time. It has a lock so two cycles don't run at once.
-- **🧠 Curation via Claude Haiku 4.5.** An **APPLIED-AI** persona (tools, capabilities, techniques, useful news for someone who USES AI — enemy #1 is **AI Slop**). Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to keep it cheap. Approve categories: `ai_tools`/`ai_capabilities`/`applied_techniques`/`autonomous_agents`/`ai_industry`; rejects: `ai_slop`/`low_signal`/`research_only`/`corporate_hype`/`basic_tutorial`/`off_topic`. **Concrete substance survives a hype tone** (a number/release/event approves; rumor/leak/hot-take is `ai_slop`). The **card summary comes out in English**. Active `/focus` topics loosen the bar. A `SpendGuard` (accurate cost estimate, with the cache discount) pauses curation at the monthly cap. **Swappable provider** via `CURATOR_PROVIDER` (`anthropic` | `kimi`).
+- **🧠 Curation via Claude Haiku 4.5.** An **APPLIED-AI** persona (tools, capabilities, techniques, useful news for someone who USES AI — enemy #1 is **AI Slop**). Each post gets a **global quality** verdict (approve/reject + category + summary + rationale) via Structured Outputs, with the rubric cached to keep it cheap. Approve categories: `ai_tools`/`ai_capabilities`/`applied_techniques`/`autonomous_agents`/`ai_industry`; rejects: `ai_slop`/`low_signal`/`research_only`/`corporate_hype`/`basic_tutorial`/`off_topic`. **Concrete substance survives a hype tone** (a number/release/event approves; rumor/leak/hot-take is `ai_slop`). The **card summary comes out in English**. Active `/focus` topics loosen the bar. A `SpendGuard` (accurate cost estimate, with the cache discount) pauses curation at the monthly cap. **Swappable provider** via `CURATOR_PROVIDER` (`anthropic` | `kimi` | `deepseek` — DeepSeek is ~10x cheaper for classification, with automatic prompt caching).
 - **👍 / 👎 with PER-BUCKET affinity.** Your votes train the ranking, and affinity is **separated per bucket**: what you like in repos doesn't interfere with what shows up in news. Affinity only **ranks**, it never hides.
 - **🎯 `/focus` by speech.** Say in natural language "I want more about agents" and the focus becomes **bidirectional**: it re-ranks delivery **and** injects the topic into ingestion, pulling in new content on that subject — broadening the search on **X** (Latest + Top), on **Reddit** (top of the day/week/month + hot), and on **GitHub**. And more: the **curator now listens to the focus** — active topics loosen the quality bar (approving on-topic content, including funding/VC) instead of just reordering what already exists.
 - **🔎 Conversational recall & `/search`.** Chat recall distinguishes **the polarity of your question**: if you ask about what you **voted** on ("did I like something about XPTO?"), the bot searches your 👍/👎; but a **general** question ("any news about XPTO?") searches the **whole archive** — anything good that passed curation, whether you voted on it or not, with ❤️ marking what you liked. `/search` does semantic search and, since the archive is embedded in English, it **translates the query** (`translate_to_en`) before searching — so you can ask in PT-BR.
@@ -102,7 +102,7 @@ Everything runs **inside the bot itself**: two jobs on the `JobQueue` (delivery 
 | **GitHub source** | `src/ingestion/github_source.py` | Trending repos by topic via the Search API (recent + `stars>=min`, ordered by stars) and reads the README best-effort; `/focus` (repos) topics enter as extra queries. `GITHUB_TOKEN` optional. Also exports `fetch_repo(url)`, used by the bot to read a single pasted github.com link via the same REST API. |
 | **X/Twitter source** | `src/ingestion/x_source.py` | Collects via subprocess of the `twitter` CLI (free mode via cookies): `user-posts` and `search`, both `--json`. `/focus` (news) topics broaden the search (Latest + Top). Also exports `fetch_tweet(url)`, used by the bot to read a single pasted x.com/twitter.com link (`twitter tweet <url> --json`) since Jina Reader 403s on that domain. |
 | **Source interface** | `src/ingestion/base.py` | `IngestionSource` ABC: every source implements `async fetch() -> list[IngestedPost]`. Dedup is the database's job. |
-| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, English summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
+| **Curator (swappable)** | `src/curation/curator.py` | `make_curator(settings)` picks the provider by `CURATOR_PROVIDER` (`anthropic` → `AnthropicCurator` with Haiku 4.5; `kimi` → Moonshot/Kimi; `deepseek` → `deepseek-v4-flash`, ~10x cheaper, automatic prompt caching, thinking disabled). **Global** quality verdict (Structured Outputs `Verdict`, cached rubric, English summary), with the `/focus` *interests* loosening the bar. `SpendGuard` persists spend and raises `BudgetExceeded`. |
 | **Steerer (chat→intent)** | `src/curation/steering.py` | Classifies free chat into `ChatIntent` (steer/recall/balance/status/capacity/other) via Haiku. `steer` → directives for `/focus` (with an optional `quota`); `recall` → search (polarity `any` falls back to the whole archive, `liked`/`disliked` to votes); `balance` → new×relevant mix (`balance_reset` to default); `status` → QUERIES the state (focus/mix); `capacity` → resizes a bucket's per-day cap. |
 | **Config / Settings** | `src/common/config.py` | Loads `.env`, `config/sources.yaml`, and `config/seeds.yaml`. `load_settings/load_sources/load_seeds`. Also owns the `RERANK_PROFILE` default (generic placeholder — write your own) and `QUERY_EMBEDDING_MODEL` (defaults to `EMBEDDING_MODEL`). |
 | **Database (pgvector)** | `src/common/db.py` | Async access (asyncpg + pgvector, `statement_cache_size=0` for the Supabase pooler). Everything scoped by `user_id`. Includes `hybrid_recall` (vector+FTS RRF fusion) and the pasted-link retry queue (`posts_needing_fetch`/`resolve_fetched_post`/`get_post_by_source`). |
@@ -154,7 +154,7 @@ psql "$DATABASE_URL" -f db/migrations/2026-07-22-hybrid-fts.sql
 
 ### 3. Anthropic and Voyage keys
 
-- **Anthropic** → `ANTHROPIC_API_KEY` (Haiku 4.5 curator + steerer). At [console.anthropic.com](https://console.anthropic.com/). The **curator is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi`); if you're going to use `kimi`, fill in `MOONSHOT_API_KEY`/`MOONSHOT_BASE_URL`/`KIMI_MODEL` instead. The steerer stays on Anthropic.
+- **Anthropic** → `ANTHROPIC_API_KEY` (Haiku 4.5 curator + steerer). At [console.anthropic.com](https://console.anthropic.com/). The **curator is swappable** via `CURATOR_PROVIDER` (`anthropic` | `kimi` | `deepseek`); for `kimi` fill in `MOONSHOT_API_KEY`/`MOONSHOT_BASE_URL`/`KIMI_MODEL`, for `deepseek` fill in `DEEPSEEK_API_KEY` (at [platform.deepseek.com](https://platform.deepseek.com/)) — the cheapest option for classification. The steerer stays on Anthropic.
 - **Voyage AI** → `VOYAGE_API_KEY` (embeddings). At [voyageai.com](https://www.voyageai.com/). Generous free tier.
 
 ### 4. Telegram bot
@@ -216,12 +216,16 @@ Then fill in `.env` (the keys from steps 3–5 + the `DATABASE_URL` from step 2)
 ANTHROPIC_API_KEY=
 CURATOR_MODEL=claude-haiku-4-5
 CURATOR_MONTHLY_BUDGET_USD=8
-# Curator provider: anthropic (default, Haiku above) | kimi (Moonshot/Kimi)
+# Curator provider: anthropic (default, Haiku above) | kimi | deepseek
 CURATOR_PROVIDER=anthropic
 # Only if CURATOR_PROVIDER=kimi (OpenAI-compatible API):
 MOONSHOT_API_KEY=
 MOONSHOT_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
+# Only if CURATOR_PROVIDER=deepseek (~10x cheaper, automatic caching):
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
 VOYAGE_API_KEY=
 EMBEDDING_MODEL=voyage-4-lite
 # Optional: bigger encoder for the search QUESTION only (same voyage-4 vector space)
@@ -307,7 +311,7 @@ Runs comfortably at **~$0–10/month**, leaning on free tiers:
 | --- | --- | --- |
 | **Supabase** | Free (Postgres + pgvector) | ~500MB; the schema has a retention note pruning `raw_text` from old rejected items. |
 | **Voyage AI** | Free tier | `voyage-4-lite`, generous free tier. |
-| **Curator (Haiku 4.5 or Kimi)** | Paid, with a cap | Provider swappable via `CURATOR_PROVIDER` (`anthropic` | `kimi`). `SpendGuard` + `CURATOR_MONTHLY_BUDGET_USD` (default **$8**) + prompt caching of the rubric. Curation **pauses** when the cap is exceeded. |
+| **Curator (Haiku 4.5, Kimi or DeepSeek)** | Paid, with a cap | Provider swappable via `CURATOR_PROVIDER` (`anthropic` | `kimi` | `deepseek`; DeepSeek ≈ a tenth of the cost). `SpendGuard` + `CURATOR_MONTHLY_BUDGET_USD` (default **$8**) + prompt caching of the rubric. Curation **pauses** when the cap is exceeded. |
 | **GitHub / Reddit / X** | Free | Public Search API, RSS feed, and twitter-cli via cookie. |
 | **Railway** | Usage-based | Always-on process. |
 
