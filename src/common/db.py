@@ -192,12 +192,15 @@ class Database:
     ) -> list[asyncpg.Record]:
         """Approved posts not yet delivered to this user.
 
-        `max_age_days`: if set, ignores posts published more than N days ago
-        (keeps the ones WITHOUT a date) — feed freshness.
+        `max_age_days`: if set, ignores posts DISCOVERED (ingested_at) more than
+        N days ago — feed freshness. We measure by `ingested_at` (when WE found
+        it), not `published_at` (when the source published it): GitHub's
+        `published_at` is the REPOSITORY's date, sometimes years old, so
+        filtering by it would empty the repos bucket. For Reddit/X the two are
+        ~equal. `ingested_at` is NOT NULL, so there's no "undated" case.
         """
         where_age = (
-            "AND (p.published_at IS NULL "
-            "OR p.published_at > now() - ($3 || ' days')::interval)"
+            "AND p.ingested_at > now() - ($3 || ' days')::interval"
             if max_age_days is not None else ""
         )
         params: list = [user_id, limit]

@@ -17,6 +17,7 @@ Run with:  python -m src.bot.bot
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, time as dtime, timezone
 from zoneinfo import ZoneInfo
@@ -97,8 +98,13 @@ BUCKETS = [
 FRESH_SLOTS = {"repos": 2, "news": 4}
 # Bucket -> cap map (derived from BUCKETS), to compute the default freshness fraction.
 _BUCKET_CAP = {key: cap for key, _h, _p, cap in BUCKETS}
-# Freshness: never delivers anything published more than N days ago (keeps undated posts).
-DELIVERY_MAX_AGE_DAYS = 30
+# Freshness: never delivers anything DISCOVERED (ingested_at) more than N days
+# ago. We measure by when WE found the post, not when the source published it —
+# otherwise the repos bucket dies: GitHub's `published_at` is the REPOSITORY's
+# date (sometimes years old), so a great repo found today would be filtered as
+# "stale". For Reddit/X "discovered" ≈ "published", so nothing changes for them.
+# Configurable via env (DELIVERY_MAX_AGE_DAYS) to tune without a redeploy.
+DELIVERY_MAX_AGE_DAYS = int(os.getenv("DELIVERY_MAX_AGE_DAYS", "7"))
 # Repeated-news dedup: a candidate within cosine distance DEDUP_MAX_DIST of
 # something ALREADY DELIVERED (same story, different source_id, sometimes another
 # source/day) is dropped — even if you liked it. Calibrated: same story <=0.18,
@@ -252,7 +258,7 @@ async def deliver_pending(app: Application, tune: bool = False) -> int:
 
     Each bucket is ranked by affinity WITHIN the bucket itself — your votes
     on repos don't affect news and vice versa — with a cap per digest. It never
-    delivers anything published more than DELIVERY_MAX_AGE_DAYS days ago.
+    delivers anything DISCOVERED (ingested_at) more than DELIVERY_MAX_AGE_DAYS days ago.
 
     `tune=True` (daily job) lets auto-balancing learn from votes before
     delivering; in `/feed` it stays False (doesn't shuffle the mix on every request).
